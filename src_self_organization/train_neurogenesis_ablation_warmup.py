@@ -206,7 +206,7 @@ def main():
     cfg.max_births_per_epoch = 16
     cfg.max_deaths_per_epoch = 16
 
-    cfg.warmup_epochs = args.warmup
+    cfg.structure_warmup_epochs = args.warmup
 
     set_seed(cfg.seed)
 
@@ -397,7 +397,7 @@ def main():
         # Recreate optimizer if network structure changed
         # --------------------------------------------------------
 
-        if update.changed:
+        if update is not None and update.changed:
 
             # Explicitly release the old optimizer and its state.
             # Structural changes replace model parameters, so the old
@@ -423,14 +423,18 @@ def main():
         # structural update of the current epoch.
         # --------------------------------------------------------
 
+        births = update.births if update is not None else 0
+        deaths = update.deaths if update is not None else 0
+        alive = update.after if update is not None else model.num_neurons
+
         print(
             f"Epoch {epoch+1:02d}/{cfg.epochs} | "
             f"Train {train_acc:.2f}% | "
             f"Test {test_acc:.2f}% | "
             f"Flux {stats['network_mean_flux']:.4f} | "
-            f"Birth {update.births} | "
-            f"Pruned {update.deaths} | "
-            f"Alive {update.after} | "
+            f"Birth {births} | "
+            f"Pruned {deaths} | "
+            f"Alive {alive} | "
             f"Total Born {len(model.birth_history)} | "
             f"Total Pruned {len(model.death_history)}"
         )

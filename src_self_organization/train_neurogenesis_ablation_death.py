@@ -211,8 +211,8 @@ def main():
     cfg.birth_threshold = 0.25
 
     # Ablate pruning threshold
-    cfg.death_flux_threshold = args.death_threshold
-    cfg.death_activity_threshold = args.death_threshold
+    # Ablate absolute maximum flux allowed for pruning
+    cfg.death_flux_max = args.death_threshold
 
     set_seed(cfg.seed)
 
@@ -453,8 +453,7 @@ def main():
 
                 "initial_neurons": cfg.hidden_neurons,
                 "birth_threshold": cfg.birth_threshold,
-                "death_flux_threshold": cfg.death_flux_threshold,
-                "death_activity_threshold": cfg.death_activity_threshold,
+                "death_flux_max": cfg.death_flux_max,
                 "max_births_per_epoch": cfg.max_births_per_epoch,
                 "max_deaths_per_epoch": cfg.max_deaths_per_epoch,
                 "seed": cfg.seed,
@@ -516,8 +515,7 @@ def main():
         "initial_neurons": cfg.hidden_neurons,
 
         "birth_threshold": cfg.birth_threshold,
-        "death_flux_threshold": cfg.death_flux_threshold,
-        "death_activity_threshold": cfg.death_activity_threshold,
+        "death_flux_max": cfg.death_flux_max,
 
         "max_births_per_epoch": cfg.max_births_per_epoch,
         "max_deaths_per_epoch": cfg.max_deaths_per_epoch,

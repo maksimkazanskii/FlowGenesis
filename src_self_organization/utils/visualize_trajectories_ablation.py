@@ -9,15 +9,15 @@ import matplotlib.pyplot as plt
 parser = argparse.ArgumentParser(
     description=(
         "Plot neurogenesis trajectories and train/test accuracy for "
-        "rate or threshold ablations."
+        "rate, beta, warmup, threshold, or regime ablations."
     )
 )
 parser.add_argument(
     "folder",
     type=str,
     help=(
-        "Ablation root containing rate_*/birth_*/death_*/neurons_*/seed_* "
-        "or a single rate_* / birth_* / death_* folder."
+        "Ablation root containing rate_*/beta_*/birth_*/death_*/neurons_*/seed_* "
+        "or a single rate_* / beta_* / birth_* / death_* folder."
     ),
 )
 parser.add_argument(
@@ -26,6 +26,13 @@ parser.add_argument(
     nargs="*",
     default=None,
     help="Optional subset of rates to plot, e.g. --rates 2 4 8 16 32.",
+)
+parser.add_argument(
+    "--warmups",
+    type=int,
+    nargs="*",
+    default=None,
+    help="Optional subset of warmup values to plot, e.g. --warmups 0 5 25.",
 )
 parser.add_argument(
     "--birth-thresholds",
@@ -46,6 +53,13 @@ parser.add_argument(
         "Optional subset of death thresholds to plot, "
         "e.g. --death-thresholds 0.01 0.05 0.1 0.25."
     ),
+)
+parser.add_argument(
+    "--betas",
+    type=float,
+    nargs="*",
+    default=None,
+    help="Optional subset of beta values to plot, e.g. --betas 0.1 0.25 0.5 0.75 1.0.",
 )
 parser.add_argument("--output", type=str, default=None)
 parser.add_argument("--dpi", type=int, default=200)
@@ -84,6 +98,14 @@ if ROOT.name.startswith("rate_"):
     experiment_type = "rate"
     condition_dirs = [ROOT]
 
+elif ROOT.name.startswith("beta_"):
+    experiment_type = "beta"
+    condition_dirs = [ROOT]
+
+elif ROOT.name.startswith("warmup_"):
+    experiment_type = "warmup"
+    condition_dirs = [ROOT]
+
 elif ROOT.name.startswith("birth_"):
     experiment_type = "birth"
     condition_dirs = [ROOT]
@@ -96,11 +118,26 @@ else:
     rate_dirs = [p for p in ROOT.glob("rate_*") if p.is_dir()]
     birth_dirs = [p for p in ROOT.glob("birth_*") if p.is_dir()]
     death_dirs = [p for p in ROOT.glob("death_*") if p.is_dir()]
+    beta_dirs = [p for p in ROOT.glob("beta_*") if p.is_dir()]
+    warmup_dirs = [p for p in ROOT.glob("warmup_*") if p.is_dir()]
+    regime_names = ["full", "no_birth", "no_death", "static"]
+
+    regime_dirs = [
+        ROOT / name
+        for name in regime_names
+        if (ROOT / name).is_dir()
+    ]
     if rate_dirs:
         experiment_type = "rate"
         condition_dirs = sorted(
             rate_dirs,
             key=lambda p: int(p.name.split("_", 1)[1]),
+        )
+    elif beta_dirs:
+        experiment_type = "beta"
+        condition_dirs = sorted(
+            beta_dirs,
+            key=lambda p: float(p.name.split("_", 1)[1]),
         )
 
     elif birth_dirs:
@@ -110,15 +147,27 @@ else:
             key=lambda p: float(p.name.split("_", 1)[1]),
         )
 
+    elif warmup_dirs:
+        experiment_type = "warmup"
+        condition_dirs = sorted(
+            warmup_dirs,
+            key=lambda p: int(p.name.split("_", 1)[1]),
+        )
     elif death_dirs:
         experiment_type = "death"
         condition_dirs = sorted(
-        death_dirs,
-        key=lambda p: float(p.name.split("_", 1)[1]),
-    )
+            death_dirs,
+            key=lambda p: float(p.name.split("_", 1)[1]),
+        )
+
+    elif regime_dirs:
+        experiment_type = "regime"
+        condition_dirs = regime_dirs
+
     else:
         raise RuntimeError(
-            f"No rate_*, birth_*, or death_* directories found under: {ROOT}"
+            f"No rate_*, beta_*, warmup_*, birth_*, death_*, "
+            f"or regime directories found under: {ROOT}"
         )
 
 
@@ -159,7 +208,26 @@ if experiment_type == "death" and args.death_thresholds is not None:
             )
         )
     ]
+if experiment_type == "warmup" and args.warmups is not None:
+    wanted = set(args.warmups)
 
+    condition_dirs = [
+        p for p in condition_dirs
+        if int(p.name.split("_", 1)[1]) in wanted
+    ]
+
+if experiment_type == "beta" and args.betas is not None:
+    wanted = np.asarray(args.betas, dtype=float)
+
+    condition_dirs = [
+        p for p in condition_dirs
+        if np.any(
+            np.isclose(
+                float(p.name.split("_", 1)[1]),
+                wanted,
+            )
+        )
+    ]
 if not condition_dirs:
     raise RuntimeError(
         f"No matching experiment directories found under: {ROOT}"
@@ -168,10 +236,14 @@ runs_by_condition = {}
 
 for condition_dir in condition_dirs:
 
-    if experiment_type == "rate":
+    if experiment_type in ("rate", "warmup"):
         condition = int(condition_dir.name.split("_", 1)[1])
-    else:
+
+    elif experiment_type in ("beta", "birth", "death"):
         condition = float(condition_dir.name.split("_", 1)[1])
+
+    elif experiment_type == "regime":
+        condition = condition_dir.name
 
     by_n = {}
 
@@ -213,7 +285,14 @@ if not runs_by_condition:
 
 
 
-conditions = sorted(runs_by_condition)
+if experiment_type == "regime":
+    regime_order = ["full", "no_birth", "no_death", "static"]
+    conditions = [
+        r for r in regime_order
+        if r in runs_by_condition
+    ]
+else:
+    conditions = sorted(runs_by_condition)
 ncols = len(conditions)
 
 fig, axes = plt.subplots(
@@ -253,10 +332,24 @@ for col, condition in enumerate(conditions):
     # --------------------------------------------------------
     if experiment_type == "rate":
         subtitle = f"Rate = {condition:g}"
+    elif experiment_type == "beta":
+        subtitle = rf"$\beta$ = {condition:g}"
+    elif experiment_type == "warmup":
+        subtitle = f"Warm-up = {condition:g}"
     elif experiment_type == "birth":
         subtitle = f"Birth threshold = {condition:g}"
-    else:
+
+    elif experiment_type == "death":
         subtitle = f"Death threshold = {condition:g}"
+
+    elif experiment_type == "regime":
+        regime_titles = {
+            "full": "Full",
+            "no_birth": "No Birth",
+            "no_death": "No Death",
+            "static": "Static",
+        }
+        subtitle = regime_titles[condition]
 
     ax_n.set_title(subtitle, fontsize=13, pad=10)
 
@@ -358,10 +451,17 @@ for col, condition in enumerate(conditions):
         # ====================================================
         if experiment_type == "rate":
             condition_text = f"rate={condition:g}"
+        elif experiment_type == "beta":
+            condition_text = f"beta={condition:g}"
+        elif experiment_type == "warmup":
+            condition_text = f"warmup={condition:g}"
         elif experiment_type == "birth":
-            condition_text = f"birth={condition:g}"
-        else:
+             condition_text = f"birth={condition:g}"
+
+        elif experiment_type == "death":
             condition_text = f"death={condition:g}"
+        elif experiment_type == "regime":
+            condition_text = condition
 
         print(
             f"{condition_text:12s} | "

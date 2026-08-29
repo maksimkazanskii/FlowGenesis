@@ -520,6 +520,7 @@ class NeuralContainer(nn.Module):
         new_output_weight = torch.empty(
             self.output_dim, new_n, device=device, dtype=dtype
         )
+
         new_output_weight[:, :old_n] = old_output_weight
         parent_output = old_output_weight[:, parent].clone()
         new_output_weight[:, parent] = 0.5 * parent_output
