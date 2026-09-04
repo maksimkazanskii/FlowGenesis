@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
-from .model_neurogenesis import NeuralContainer
+from ..model_neurogenesis import NeuralContainer
 import argparse
 from pathlib import Path
 
@@ -105,20 +105,19 @@ def train_epoch(model, loader, optimizer, criterion, device):
         optimizer.zero_grad(set_to_none=True)
 
         logits = model(images)
-
         loss = criterion(logits, labels)
 
         loss.backward()
-
         optimizer.step()
 
         total_loss += loss.item()
 
         pred = logits.argmax(1)
-
         correct += (pred == labels).sum().item()
-
         total += labels.size(0)
+
+        # Release batch tensors as soon as possible
+        del images, labels, logits, loss, pred
 
     return total_loss / len(loader), 100.0 * correct / total
 
@@ -142,16 +141,16 @@ def evaluate(model, loader, criterion, device):
         labels = labels.to(device)
 
         logits = model(images)
-
         loss = criterion(logits, labels)
 
         total_loss += loss.item()
 
         pred = logits.argmax(1)
-
         correct += (pred == labels).sum().item()
-
         total += labels.size(0)
+
+        # Release batch tensors
+        del images, labels, logits, loss, pred
 
     return total_loss / len(loader), 100.0 * correct / total
 
@@ -194,10 +193,10 @@ def main():
     # ============================================================
 
     if args.dataset == "fashionmnist":
-        from .config import Config
+        from ..config import Config
 
     elif args.dataset == "cifar10":
-        from .config_cifar import Config
+        from ..config_cifar import Config
 
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
@@ -208,9 +207,6 @@ def main():
     cfg.hidden_neurons = args.hidden_neurons
     cfg.seed = args.seed
 
-    # Fixed rate for N0 ablation
-    cfg.max_births_per_epoch = 16
-    cfg.max_deaths_per_epoch = 16
 
     set_seed(cfg.seed)
 
@@ -460,11 +456,12 @@ def main():
         del train_loss, train_acc
         del test_loss, test_acc
         del stats, update
-
         gc.collect()
 
-        if torch.cuda.is_available():
+        if device.type == "cuda":
             torch.cuda.empty_cache()
+        elif device.type == "mps":
+            torch.mps.empty_cache()
 
     # ============================================================
     # Save final developmental statistics

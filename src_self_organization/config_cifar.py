@@ -32,8 +32,8 @@ class Config:
     input_dim: int = 3 * 32 * 32
     output_dim: int = 10
 
-    batch_size: int = 128
-    num_workers: int = 4
+    batch_size: int = 32
+    num_workers: int = 0
 
     # ============================================================
     # Training
@@ -75,25 +75,23 @@ class Config:
     # Neurogenesis
     # ------------------------------------------------------------
 
-    birth_threshold: float = 0.25
-    birth_persistence: int = 3
-
-    # Fixed for CIFAR N0 ablation
+    birth_threshold: float = 0.80
+    birth_persistence: int = 5
     max_births_per_epoch: int = 16
 
     # ------------------------------------------------------------
     # Pruning
     # ------------------------------------------------------------
 
-    death_flux_threshold: float = 0.01
-    death_activity_threshold: float = 0.01
+    death_activity_fraction: float = 0.1
+    death_flux_fraction: float = 0.1
 
     death_persistence: int = 5
 
     # Fixed for CIFAR N0 ablation
     max_deaths_per_epoch: int = 16
 
-    # ------------------------------------------------------------
+    # ----------------x--------------------------------------------
     # Structural limits
     # ------------------------------------------------------------
 
