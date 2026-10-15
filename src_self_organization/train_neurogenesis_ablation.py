@@ -181,13 +181,28 @@ def main():
         default=None,
     )
 
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Optional root output directory. Existing experiment subfolders are appended underneath it.",
+    )
 
     parser.add_argument(
-        "--rate",
-        type=int,
-        choices=[2, 4, 8, 16, 32],
-        required=True,
-        help="Maximum births and deaths per epoch.",
+        "--ablation",
+        choices=["beta", "birth", "death", "rate", "regime", "warmup"],
+        default=None,
+        help="Optional ablation to run.",
+    )
+
+    parser.add_argument(
+        "--value",
+        default=None,
+        help=(
+            "Value for the selected ablation: "
+            "beta=float, birth=float, death=float, rate=int, "
+            "regime=full/no_birth/no_death/static, warmup=int."
+        ),
     )
 
     args = parser.parse_args()
@@ -197,15 +212,74 @@ def main():
     # ============================================================
 
     cfg = Config()
+
     if args.hidden_neurons is not None:
         cfg.hidden_neurons = args.hidden_neurons
 
     if args.seed is not None:
         cfg.seed = args.seed
 
-    if args.rate is not None:
-        cfg.max_births_per_epoch = args.rate
-        cfg.max_deaths_per_epoch = args.rate
+    if args.ablation is not None and args.value is None:
+        parser.error("--value is required when --ablation is specified")
+
+    if args.ablation == "beta":
+        value = float(args.value)
+        if not 0.0 <= value <= 1.0:
+            parser.error("--value for beta must be between 0 and 1")
+        cfg.max_births_per_epoch = 16
+        cfg.max_deaths_per_epoch = 16
+        cfg.recurrent_connection_probability = value
+
+    elif args.ablation == "birth":
+        cfg.max_births_per_epoch = 32
+        cfg.max_deaths_per_epoch = 32
+        cfg.birth_threshold = float(args.value)
+        cfg.death_flux_threshold = 0.01
+        cfg.death_activity_threshold = 0.01
+
+    elif args.ablation == "death":
+        cfg.max_births_per_epoch = 32
+        cfg.max_deaths_per_epoch = 32
+        cfg.birth_threshold = 0.25
+        cfg.death_flux_max = float(args.value)
+
+    elif args.ablation == "rate":
+        value = int(args.value)
+        if value not in [2, 4, 8, 16, 32, 64, 128]:
+            parser.error("--value for rate must be one of: 2, 4, 8, 16, 32, 64, 128")
+        cfg.max_births_per_epoch = value
+        cfg.max_deaths_per_epoch = value
+
+    elif args.ablation == "regime":
+        variant = args.value
+        if variant not in ["full", "no_birth", "no_death", "static"]:
+            parser.error(
+                "--value for regime must be one of: "
+                "full, no_birth, no_death, static"
+            )
+
+        cfg.warmup_epochs = 5
+
+        if variant == "full":
+            cfg.max_births_per_epoch = 32
+            cfg.max_deaths_per_epoch = 32
+        elif variant == "no_birth":
+            cfg.max_births_per_epoch = 0
+            cfg.max_deaths_per_epoch = 32
+        elif variant == "no_death":
+            cfg.max_births_per_epoch = 32
+            cfg.max_deaths_per_epoch = 0
+        elif variant == "static":
+            cfg.max_births_per_epoch = 0
+            cfg.max_deaths_per_epoch = 0
+
+    elif args.ablation == "warmup":
+        value = int(args.value)
+        if value < 0:
+            parser.error("--value for warmup must be >= 0")
+        cfg.max_births_per_epoch = 16
+        cfg.max_deaths_per_epoch = 16
+        cfg.structure_warmup_epochs = value
 
     set_seed(cfg.seed)
 
@@ -235,13 +309,33 @@ def main():
     # Output directory
     # ============================================================
 
-    save_dir = (
-            Path("data/so/ablation")
-            / cfg.dataset.lower()
-            / f"rate_{cfg.max_births_per_epoch}"
-            / f"neurons_{cfg.hidden_neurons}"
-            / f"seed_{cfg.seed}"
-    )
+    if args.ablation is None:
+        relative_save_dir = (
+                Path("data/so/neurogenesis")
+                / cfg.dataset.lower()
+                / f"neurons_{cfg.hidden_neurons}"
+                / f"seed_{cfg.seed}"
+        )
+    else:
+        safe_value = str(args.value).replace("/", "_")
+        relative_save_dir = (
+                Path("data/so/ablations")
+                / cfg.dataset.lower()
+                / args.ablation
+                / f"value_{safe_value}"
+                / f"neurons_{cfg.hidden_neurons}"
+                / f"seed_{cfg.seed}"
+        )
+
+    if args.output_dir is None:
+        save_dir = relative_save_dir
+    else:
+        save_dir = (
+                Path(cfg.output_dir)
+                / args.output_dir
+                / f"neurons_{cfg.hidden_neurons}"
+                / f"seed_{cfg.seed}"
+        )
 
     save_dir.mkdir(
         parents=True,
@@ -273,13 +367,24 @@ def main():
     final_total_pruned = None
 
     # ============================================================
+    # Learning curves
+    # ============================================================
+
+    learning_curves = {
+        "epoch": [],
+        "train_loss": [],
+        "train_accuracy": [],
+        "test_loss": [],
+        "test_accuracy": [],
+        "num_neurons": [],
+        "total_born": [],
+        "total_pruned": [],
+    }
+
+    # ============================================================
     # Training
     # ============================================================
-    train_loss_history = []
-    train_acc_history = []
 
-    test_loss_history = []
-    test_acc_history = []
     for epoch in range(cfg.epochs):
 
         # --------------------------------------------------------
@@ -307,11 +412,7 @@ def main():
             criterion,
             device,
         )
-        train_loss_history.append(float(train_loss))
-        train_acc_history.append(float(train_acc))
 
-        test_loss_history.append(float(test_loss))
-        test_acc_history.append(float(test_acc))
         # --------------------------------------------------------
         # Snapshot current evaluated architecture
         # --------------------------------------------------------
@@ -319,6 +420,15 @@ def main():
         eval_neurons = model.num_neurons
         eval_total_born = len(model.birth_history)
         eval_total_pruned = len(model.death_history)
+
+        learning_curves["epoch"].append(epoch + 1)
+        learning_curves["train_loss"].append(train_loss)
+        learning_curves["train_accuracy"].append(train_acc)
+        learning_curves["test_loss"].append(test_loss)
+        learning_curves["test_accuracy"].append(test_acc)
+        learning_curves["num_neurons"].append(eval_neurons)
+        learning_curves["total_born"].append(eval_total_born)
+        learning_curves["total_pruned"].append(eval_total_pruned)
 
         # --------------------------------------------------------
         # Save best model + developmental state
@@ -445,26 +555,21 @@ def main():
             torch.cuda.empty_cache()
 
     # ============================================================
+    # Save learning curves
+    # ============================================================
+
+    torch.save(
+        learning_curves,
+        save_dir / "learning_curves.pt",
+        )
+
+    # ============================================================
     # Save final developmental statistics
     # ============================================================
 
     model.save_statistics(
         save_dir / "statistics.pt"
     )
-    torch.save(
-        {
-            "epoch": list(range(1, cfg.epochs + 1)),
-            "train_loss": train_loss_history,
-            "train_accuracy": train_acc_history,
-            "test_loss": test_loss_history,
-            "test_accuracy": test_acc_history,
-
-            "initial_neurons": cfg.hidden_neurons,
-            "rate": cfg.max_births_per_epoch,
-            "seed": cfg.seed,
-        },
-        save_dir / "learning_curves.pt",
-        )
 
     # ============================================================
     # Save final POST-UPDATE network
@@ -499,8 +604,7 @@ def main():
         "dataset": cfg.dataset,
         "seed": cfg.seed,
         "initial_neurons": cfg.hidden_neurons,
-        "max_births_per_epoch": cfg.max_births_per_epoch,
-        "max_deaths_per_epoch": cfg.max_deaths_per_epoch,
+
         # --------------------------------------------------------
         # Best evaluated state
         # --------------------------------------------------------

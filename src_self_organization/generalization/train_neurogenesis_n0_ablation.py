@@ -10,10 +10,10 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets
 from torchvision.transforms import ToTensor
-from ..model_neurogenesis import NeuralContainer
+from ..model_neurogenesis_new import NeuralContainer
 import argparse
 from pathlib import Path
 
@@ -68,6 +68,7 @@ def get_dataloaders(cfg):
         transform=ToTensor(),
     )
 
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.batch_size,
@@ -82,6 +83,7 @@ def get_dataloaders(cfg):
         num_workers=cfg.num_workers,
     )
 
+
     return train_loader, test_loader
 
 
@@ -89,7 +91,7 @@ def get_dataloaders(cfg):
 # Training
 # ============================================================
 
-def train_epoch(model, loader, optimizer, criterion, device):
+def train_epoch(model, loader, optimizer, criterion, device, cfg, on_structure=None):
 
     model.train()
 
@@ -110,6 +112,9 @@ def train_epoch(model, loader, optimizer, criterion, device):
         loss.backward()
         optimizer.step()
 
+        if on_structure is not None and model.window_examples >= cfg.structure_check_every_examples:
+            optimizer = on_structure(optimizer)
+
         total_loss += loss.item()
 
         pred = logits.argmax(1)
@@ -119,7 +124,7 @@ def train_epoch(model, loader, optimizer, criterion, device):
         # Release batch tensors as soon as possible
         del images, labels, logits, loss, pred
 
-    return total_loss / len(loader), 100.0 * correct / total
+    return total_loss / len(loader), 100.0 * correct / total, optimizer
 
 
 # ============================================================
@@ -237,6 +242,28 @@ def main():
     train_loader, test_loader = get_dataloaders(cfg)
 
     # ============================================================
+    # Fixed probe set for structural Flux
+    # ============================================================
+
+    probe_size = min(512, len(train_loader.dataset))
+
+    probe_dataset = Subset(
+        train_loader.dataset,
+        list(range(probe_size)),
+    )
+
+    probe_loader = DataLoader(
+        probe_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+    )
+
+    # ============================================================
+    # Model
+    # ============================================================
+
+    # ============================================================
     # Model
     # ============================================================
 
@@ -298,18 +325,41 @@ def main():
 
     test_loss_history = []
     test_acc_history = []
+    structure_events = []
+    examples_history = []
+
+    def structural_check(current_optimizer):
+        stats = model.end_epoch()  # aggregates the latest example window
+        update = model.apply_structural_updates()
+        structure_events.append({
+            "examples_seen": model.examples_seen,
+            "flux": stats["network_mean_flux"],
+            "births": update.births,
+            "deaths": update.deaths,
+            "neurons": update.after,
+        })
+        if update.changed:
+            del current_optimizer
+            gc.collect()
+            return torch.optim.Adam(model.parameters(), lr=cfg.learning_rate,
+                                    weight_decay=cfg.weight_decay)
+        return current_optimizer
+
     for epoch in range(cfg.epochs):
+        model.current_epoch = epoch + 1
 
         # --------------------------------------------------------
         # Train
         # --------------------------------------------------------
 
-        train_loss, train_acc = train_epoch(
+        train_loss, train_acc, optimizer = train_epoch(
             model,
             train_loader,
             optimizer,
             criterion,
             device,
+            cfg,
+            structural_check,
         )
 
         # --------------------------------------------------------
@@ -362,6 +412,7 @@ def main():
                     "initial_hidden_neurons": cfg.hidden_neurons,
 
                     "epoch": best_epoch,
+                    "examples_seen": model.examples_seen,
 
                     "test_acc": best_acc,
                     "test_loss": best_loss,
@@ -396,39 +447,22 @@ def main():
         # End-of-epoch flux statistics
         # --------------------------------------------------------
 
-        stats = model.end_epoch()
-
         # --------------------------------------------------------
-        # Neurogenesis / pruning
+        # Fixed-probe representation Flux
         # --------------------------------------------------------
 
-        # --------------------------------------------------------
-        # Neurogenesis / pruning
-        # --------------------------------------------------------
-
-        update = model.apply_structural_updates()
 
         # --------------------------------------------------------
-        # Recreate optimizer if network structure changed
+        # End-of-epoch statistics
         # --------------------------------------------------------
 
-        if update.changed:
-
-            # Explicitly release the old optimizer and its state.
-            # Structural changes replace model parameters, so the old
-            # Adam state is no longer needed.
-            del optimizer
-
-            gc.collect()
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            optimizer = torch.optim.Adam(
-                model.parameters(),
-                lr=cfg.learning_rate,
-                weight_decay=cfg.weight_decay,
-            )
+        # Structural checks are performed during train_epoch, not here.
+        # Keep the residual window for the next epoch.
+        update_events = [e for e in structure_events if e["examples_seen"] >
+                         (examples_history[-1] if examples_history else 0)]
+        births_this_epoch = sum(e["births"] for e in update_events)
+        deaths_this_epoch = sum(e["deaths"] for e in update_events)
+        examples_history.append(model.examples_seen)
 
         # --------------------------------------------------------
         # Print epoch statistics
@@ -442,10 +476,10 @@ def main():
             f"Epoch {epoch+1:02d}/{cfg.epochs} | "
             f"Train {train_acc:.2f}% | "
             f"Test {test_acc:.2f}% | "
-            f"Flux {stats['network_mean_flux']:.4f} | "
-            f"Birth {update.births} | "
-            f"Pruned {update.deaths} | "
-            f"Alive {update.after} | "
+            f"Examples {model.examples_seen} | "
+            f"Birth {births_this_epoch} | "
+            f"Pruned {deaths_this_epoch} | "
+            f"Alive {model.num_neurons} | "
             f"Total Born {len(model.birth_history)} | "
             f"Total Pruned {len(model.death_history)}"
         )
@@ -455,7 +489,6 @@ def main():
 
         del train_loss, train_acc
         del test_loss, test_acc
-        del stats, update
         gc.collect()
 
         if device.type == "cuda":
@@ -473,6 +506,8 @@ def main():
     torch.save(
         {
             "epoch": list(range(1, cfg.epochs + 1)),
+            "examples_seen": examples_history,
+            "structure_events": structure_events,
             "train_loss": train_loss_history,
             "train_accuracy": train_acc_history,
             "test_loss": test_loss_history,
@@ -505,6 +540,7 @@ def main():
 
             "total_born": len(model.birth_history),
             "total_pruned": len(model.death_history),
+            "examples_seen": model.examples_seen,
         },
         save_dir / "final_model.pt",
         )
@@ -540,6 +576,8 @@ def main():
         "final_accuracy": final_test_acc,
         "final_loss": final_test_loss,
         "final_epoch": cfg.epochs,
+        "final_examples_seen": model.examples_seen,
+        "structure_events": structure_events,
 
         "final_neurons": final_neurons,
 

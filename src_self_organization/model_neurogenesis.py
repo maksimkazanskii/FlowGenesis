@@ -252,14 +252,14 @@ class NeuralContainer(nn.Module):
                 overloaded,
                 self.birth_streak + 1,
                 torch.zeros_like(self.birth_streak),
-            )
+                )
         )
         self.death_streak.copy_(
             torch.where(
                 inactive,
                 self.death_streak + 1,
                 torch.zeros_like(self.death_streak),
-            )
+                )
         )
 
         self.flux_history.append(mean_flux.detach().cpu().clone())
@@ -276,6 +276,12 @@ class NeuralContainer(nn.Module):
             "network_mean_activity": mean_activity.mean().item(),
             "birth_candidates": int(
                 (self.birth_streak >= self.birth_persistence).sum().item()
+            ),
+            "death_candidates_flux": int(
+                ((mean_flux <= flux_threshold) & (mean_flux < self.death_flux_max)).sum().item()
+            ),
+            "death_candidates_activity": int(
+                (mean_activity <= activity_threshold).sum().item()
             ),
             "death_candidates": int(
                 (self.death_streak >= self.death_persistence).sum().item()
@@ -488,8 +494,8 @@ class NeuralContainer(nn.Module):
         new_input = torch.empty(new_n, self.input_dim, device=device, dtype=dtype)
         new_input[:old_n] = old_input
         new_input[old_n] = (
-            old_input[parent]
-            + self.split_noise_std * torch.randn_like(old_input[parent])
+                old_input[parent]
+                + self.split_noise_std * torch.randn_like(old_input[parent])
         )
 
         new_W = torch.zeros(new_n, new_n, device=device, dtype=dtype)
@@ -497,8 +503,8 @@ class NeuralContainer(nn.Module):
 
         # Child receives approximately the same inputs as the parent.
         new_W[old_n, :old_n] = (
-            old_W[parent, :]
-            + self.split_noise_std * torch.randn_like(old_W[parent, :])
+                old_W[parent, :]
+                + self.split_noise_std * torch.randn_like(old_W[parent, :])
         )
 
         # Parent and child share the parent's previous outgoing influence.
@@ -520,7 +526,6 @@ class NeuralContainer(nn.Module):
         new_output_weight = torch.empty(
             self.output_dim, new_n, device=device, dtype=dtype
         )
-
         new_output_weight[:, :old_n] = old_output_weight
         parent_output = old_output_weight[:, parent].clone()
         new_output_weight[:, parent] = 0.5 * parent_output
@@ -590,16 +595,16 @@ class NeuralContainer(nn.Module):
 
     @torch.no_grad()
     def _replace_structure(
-        self,
-        *,
-        input_weight: torch.Tensor,
-        recurrent_weight: torch.Tensor,
-        bias: torch.Tensor,
-        output_weight: torch.Tensor,
-        output_bias: torch.Tensor,
-        mask: torch.Tensor,
-        kept_indices: torch.Tensor | None,
-        newborn_parent: int | None,
+            self,
+            *,
+            input_weight: torch.Tensor,
+            recurrent_weight: torch.Tensor,
+            bias: torch.Tensor,
+            output_weight: torch.Tensor,
+            output_bias: torch.Tensor,
+            mask: torch.Tensor,
+            kept_indices: torch.Tensor | None,
+            newborn_parent: int | None,
     ) -> None:
         """Replace all shape-dependent parameters and buffers."""
         device = recurrent_weight.device
@@ -626,10 +631,10 @@ class NeuralContainer(nn.Module):
         self.degree = self._degree_from_mask(self.mask)
 
         def resize_buffer(
-            old: torch.Tensor,
-            *,
-            fill: float = 0.0,
-            dtype_override: torch.dtype | None = None,
+                old: torch.Tensor,
+                *,
+                fill: float = 0.0,
+                dtype_override: torch.dtype | None = None,
         ) -> torch.Tensor:
             target_dtype = dtype_override or old.dtype
             result = torch.full(

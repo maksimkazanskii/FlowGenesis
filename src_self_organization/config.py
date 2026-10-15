@@ -17,7 +17,7 @@ class Config:
 
     dataset: str = "FashionMNIST"
 
-    output_dir: str = "data/so"
+    output_dir: str = "data/neurogenesis"
 
     # ============================================================
     # Dataset

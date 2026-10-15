@@ -3,9 +3,10 @@ train.py
 
 Experiment 0
 
-Training script for the Random Neural Container.
+Unified ablation runner for the historical/GitHub NeuralContainer model.
 """
 import gc
+import os
 import random
 import numpy as np
 import torch
@@ -13,8 +14,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
-from ..model_neurogenesis import NeuralContainer
-import argparse
+from .config import Config
+from .model_neurogenesis import NeuralContainer
 from pathlib import Path
 
 
@@ -41,15 +42,15 @@ def set_seed(seed):
 def get_dataloaders(cfg):
 
     if cfg.dataset.lower() == "mnist":
+
         dataset_class = datasets.MNIST
 
     elif cfg.dataset.lower() == "fashionmnist":
+
         dataset_class = datasets.FashionMNIST
 
-    elif cfg.dataset.lower() == "cifar10":
-        dataset_class = datasets.CIFAR10
-
     else:
+
         raise ValueError(
             f"Unknown dataset: {cfg.dataset}"
         )
@@ -105,19 +106,20 @@ def train_epoch(model, loader, optimizer, criterion, device):
         optimizer.zero_grad(set_to_none=True)
 
         logits = model(images)
+
         loss = criterion(logits, labels)
 
         loss.backward()
+
         optimizer.step()
 
         total_loss += loss.item()
 
         pred = logits.argmax(1)
-        correct += (pred == labels).sum().item()
-        total += labels.size(0)
 
-        # Release batch tensors as soon as possible
-        del images, labels, logits, loss, pred
+        correct += (pred == labels).sum().item()
+
+        total += labels.size(0)
 
     return total_loss / len(loader), 100.0 * correct / total
 
@@ -141,16 +143,16 @@ def evaluate(model, loader, criterion, device):
         labels = labels.to(device)
 
         logits = model(images)
+
         loss = criterion(logits, labels)
 
         total_loss += loss.item()
 
         pred = logits.argmax(1)
-        correct += (pred == labels).sum().item()
-        total += labels.size(0)
 
-        # Release batch tensors
-        del images, labels, logits, loss, pred
+        correct += (pred == labels).sum().item()
+
+        total += labels.size(0)
 
     return total_loss / len(loader), 100.0 * correct / total
 
@@ -162,93 +164,118 @@ def evaluate(model, loader, criterion, device):
 def main():
 
     # ============================================================
-    # Arguments
+    # EXPERIMENT / ABLATION SETTINGS
+    # ============================================================
+    # Change ONLY this block to run a different ablation.
+    #
+    # ABLATION:
+    #   "n0"     -> VALUE is initial neuron count
+    #   "beta"   -> VALUE is recurrent connection probability
+    #   "birth"  -> VALUE is birth threshold
+    #   "death"  -> VALUE is death threshold
+    #   "warmup" -> VALUE is structural warmup epochs
+    #   "regime" -> VALUE is "full", "no_birth", "no_death", or "static"
+    #
+    # SEED controls the random seed for this run.
     # ============================================================
 
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        choices=["fashionmnist", "cifar10"],
-        required=True,
-    )
-
-    parser.add_argument(
-        "--birth_rate",
-        type=int,
-        required=True,
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=1,
-    )
-
-    args = parser.parse_args()
+    # Can be overridden from the shell, e.g.
+    # ABLATION=n0 VALUE=160 SEED=4 python -m src_self_organization.train_flowgenesis
+    ABLATION = os.environ.get("ABLATION", "n0").strip().lower()
+    VALUE = os.environ.get("VALUE", "20").strip()
+    SEED = int(os.environ.get("SEED", "0"))
 
     # ============================================================
-    # Configuration
+    # Canonical historical/GitHub baseline
     # ============================================================
-
-    if args.dataset == "fashionmnist":
-        from ..config import Config
-
-    elif args.dataset == "cifar10":
-        from ..config_cifar import Config
-
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
 
     cfg = Config()
 
-    cfg.dataset = args.dataset
+    # The August-3 model reads its scientific hyperparameters directly
+    # from Config.  Do not replace them with reconstructed constants here.
+    # The trainer changes only the requested ablation value and seed.
+    cfg.seed = SEED
 
-    # Fixed N0 for birth-rate ablation
-    cfg.hidden_neurons = 80
+    baseline_birth_rate = int(cfg.max_births_per_epoch)
+    baseline_death_rate = int(cfg.max_deaths_per_epoch)
 
-    # Ablated structural parameter
-    cfg.max_births_per_epoch = args.birth_rate
+    # ============================================================
+    # Apply exactly ONE ablation
+    # ============================================================
 
-    cfg.seed = args.seed
+    if ABLATION == "n0":
+        cfg.hidden_neurons = int(VALUE)
 
+    elif ABLATION == "beta":
+        value = float(VALUE)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("beta must be between 0 and 1")
+        cfg.recurrent_connection_probability = value
+
+    elif ABLATION == "birth":
+        cfg.birth_threshold = float(VALUE)
+
+    elif ABLATION == "death":
+        value = float(VALUE)
+        if hasattr(cfg, "death_flux_threshold"):
+            cfg.death_flux_threshold = value
+        if hasattr(cfg, "death_activity_threshold"):
+            cfg.death_activity_threshold = value
+
+    elif ABLATION == "warmup":
+        value = int(VALUE)
+        if value < 0:
+            raise ValueError("warmup must be >= 0")
+        if hasattr(cfg, "structure_warmup_epochs"):
+            cfg.structure_warmup_epochs = value
+        if hasattr(cfg, "warmup_epochs"):
+            cfg.warmup_epochs = value
+
+    elif ABLATION == "regime":
+        variant = str(VALUE)
+        allowed = {"full", "no_birth", "no_death", "static"}
+        if variant not in allowed:
+            raise ValueError(
+                "regime must be one of: full, no_birth, no_death, static"
+            )
+
+        if variant == "full":
+            cfg.use_neurogenesis = True
+            cfg.use_pruning = True
+            cfg.max_births_per_epoch = baseline_birth_rate
+            cfg.max_deaths_per_epoch = baseline_death_rate
+        elif variant == "no_birth":
+            cfg.use_neurogenesis = False
+            cfg.use_pruning = True
+            cfg.max_births_per_epoch = 0
+            cfg.max_deaths_per_epoch = baseline_death_rate
+        elif variant == "no_death":
+            cfg.use_neurogenesis = True
+            cfg.use_pruning = False
+            cfg.max_births_per_epoch = baseline_birth_rate
+            cfg.max_deaths_per_epoch = 0
+        elif variant == "static":
+            cfg.use_neurogenesis = False
+            cfg.use_pruning = False
+            cfg.max_births_per_epoch = 0
+            cfg.max_deaths_per_epoch = 0
+
+    else:
+        raise ValueError(
+            f"Unknown ABLATION={ABLATION!r}. "
+            "Use n0, beta, birth, death, warmup, or regime."
+        )
 
     set_seed(cfg.seed)
-
-    # CUDA -> MPS -> CPU
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-
-    cfg.device = str(device)
-
-    print(
-        f"Dataset={cfg.dataset} | "
-        f"N0={cfg.hidden_neurons} | "
-        f"BirthRate={cfg.max_births_per_epoch} | "
-        f"DeathRate={cfg.max_deaths_per_epoch} | "
-        f"Seed={cfg.seed} | "
-        f"Device={device}"
-    )
-
     device = torch.device(cfg.device)
 
     # ============================================================
-    # Data
+    # Data / model
     # ============================================================
 
     train_loader, test_loader = get_dataloaders(cfg)
 
-    # ============================================================
-    # Model
-    # ============================================================
-
     model = NeuralContainer(cfg).to(device)
-
     criterion = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
@@ -261,17 +288,31 @@ def main():
     # Output directory
     # ============================================================
 
+    safe_value = str(VALUE).replace("/", "_")
     save_dir = (
-            Path("data/so/birth_rate_ablation")
+            Path("data/so/ablations")
             / cfg.dataset.lower()
-            / f"birth_rate_{cfg.max_births_per_epoch}"
+            / ABLATION
+            / f"value_{safe_value}"
+            / f"neurons_{cfg.hidden_neurons}"
             / f"seed_{cfg.seed}"
     )
 
-    save_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    print("========================================")
+    print(f"Ablation      : {ABLATION}")
+    print(f"Value         : {VALUE}")
+    print(f"Seed          : {cfg.seed}")
+    print(f"Initial N     : {cfg.hidden_neurons}")
+    print(f"Beta          : {cfg.recurrent_connection_probability}")
+    print(f"Birth thresh  : {cfg.birth_threshold}")
+    print(f"Death flux    : {getattr(cfg, 'death_flux_threshold', None)}")
+    print(f"Death activity: {getattr(cfg, 'death_activity_threshold', None)}")
+    print(f"Birth rate    : {cfg.max_births_per_epoch}")
+    print(f"Death rate    : {cfg.max_deaths_per_epoch}")
+    print(f"Save dir      : {save_dir}")
+    print("========================================")
 
     # ============================================================
     # Statistics
@@ -302,9 +343,9 @@ def main():
     # ============================================================
     train_loss_history = []
     train_acc_history = []
-
     test_loss_history = []
     test_acc_history = []
+
     for epoch in range(cfg.epochs):
 
         # --------------------------------------------------------
@@ -332,6 +373,7 @@ def main():
             criterion,
             device,
         )
+
         train_loss_history.append(float(train_loss))
         train_acc_history.append(float(train_acc))
 
@@ -367,7 +409,9 @@ def main():
                     "seed": cfg.seed,
 
                     "initial_hidden_neurons": cfg.hidden_neurons,
-
+                    "ablation": ABLATION,
+                    "ablation_value": VALUE,
+                    "rate": cfg.max_births_per_epoch,
                     "epoch": best_epoch,
 
                     "test_acc": best_acc,
@@ -400,7 +444,7 @@ def main():
             final_total_pruned = eval_total_pruned
 
         # --------------------------------------------------------
-        # End-of-epoch flux statistics
+        # End-of-epoch statistics / persistence counters
         # --------------------------------------------------------
 
         stats = model.end_epoch()
@@ -449,7 +493,9 @@ def main():
             f"Epoch {epoch+1:02d}/{cfg.epochs} | "
             f"Train {train_acc:.2f}% | "
             f"Test {test_acc:.2f}% | "
-            f"Flux {stats['network_mean_flux']:.4f} | "
+            f"Flux {stats['network_mean_flux']:.6f} | "
+            f"MaxFlux {stats['network_max_flux']:.6f} | "
+            f"BirthCand {stats['birth_candidates']} | "
             f"Birth {update.births} | "
             f"Pruned {update.deaths} | "
             f"Alive {update.after} | "
@@ -463,12 +509,11 @@ def main():
         del train_loss, train_acc
         del test_loss, test_acc
         del stats, update
+
         gc.collect()
 
-        if device.type == "cuda":
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        elif device.type == "mps":
-            torch.mps.empty_cache()
 
     # ============================================================
     # Save final developmental statistics
@@ -484,15 +529,16 @@ def main():
             "train_accuracy": train_acc_history,
             "test_loss": test_loss_history,
             "test_accuracy": test_acc_history,
+            "neurons": model.neuron_count_history,
 
             "initial_neurons": cfg.hidden_neurons,
-            "birth_rate": cfg.max_births_per_epoch,
-            "death_rate": cfg.max_deaths_per_epoch,
+            "ablation": ABLATION,
+            "ablation_value": VALUE,
+            "rate": cfg.max_births_per_epoch,
             "seed": cfg.seed,
         },
         save_dir / "learning_curves.pt",
         )
-
     # ============================================================
     # Save final POST-UPDATE network
     #
@@ -508,7 +554,9 @@ def main():
             "seed": cfg.seed,
 
             "initial_hidden_neurons": cfg.hidden_neurons,
-
+            "ablation": ABLATION,
+            "ablation_value": VALUE,
+            "rate": cfg.max_births_per_epoch,
             "hidden_neurons": model.num_neurons,
 
             "total_born": len(model.birth_history),
@@ -522,12 +570,16 @@ def main():
     # ============================================================
 
     summary = {
-
         "dataset": cfg.dataset,
         "seed": cfg.seed,
         "initial_neurons": cfg.hidden_neurons,
+
+        "ablation": ABLATION,
+        "ablation_value": VALUE,
+
         "max_births_per_epoch": cfg.max_births_per_epoch,
         "max_deaths_per_epoch": cfg.max_deaths_per_epoch,
+
         # --------------------------------------------------------
         # Best evaluated state
         # --------------------------------------------------------

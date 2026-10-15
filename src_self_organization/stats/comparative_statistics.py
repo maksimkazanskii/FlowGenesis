@@ -192,11 +192,19 @@ def load_runs(root: Path, checkpoint_name: str):
     datasets_seen = set()
 
     for path in paths:
+        # Only analyze checkpoints stored in the expected experiment layout:
+        #   .../neurons_<N0>/seed_<seed>/<checkpoint_name>
+        # Stray/root-level checkpoints are ignored rather than aborting the run.
+        try:
+            condition, n0, seed = parse_path_metadata(path, root)
+        except ValueError as exc:
+            print(f"[SKIP] {path}: {exc}")
+            continue
+
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)
         tensors = extract_tensors(state_dict)
 
-        condition, n0, seed = parse_path_metadata(path, root)
         dataset_name = str(ckpt.get("dataset", "")).strip()
         if dataset_name:
             datasets_seen.add(dataset_name.lower())
@@ -211,6 +219,11 @@ def load_runs(root: Path, checkpoint_name: str):
             "n_final": int(tensors["W"].shape[0]),
             "tensors": tensors,
         })
+
+    if not runs:
+        raise FileNotFoundError(
+            f"No valid {checkpoint_name!r} files with neurons_<N0>/seed_<seed> metadata found below {root}"
+        )
 
     if len(datasets_seen) > 1:
         raise ValueError(
