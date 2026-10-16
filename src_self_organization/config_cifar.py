@@ -64,7 +64,7 @@ class Config:
     # Neurogenesis
     # ------------------------------------------------------------
 
-    birth_threshold: float = 0.2
+    birth_threshold: float = 0.35
 
     birth_persistence: int = 5000
 
@@ -74,11 +74,11 @@ class Config:
     # Pruning
     # ------------------------------------------------------------
 
-    death_flux_threshold: float = 0.005
+    death_flux_threshold: float = 0.002
 
-    death_activity_threshold: float = 0.01
+    death_activity_threshold: float = 0.005
 
-    death_persistence: int = 10000
+    death_persistence: int = 30000
 
 
     max_deaths_per_epoch: int = 32
@@ -87,7 +87,7 @@ class Config:
     # Structural limits
     # ------------------------------------------------------------
 
-    min_neurons: int = 50
+    min_neurons: int = 20
 
     max_neurons: int = 900
 

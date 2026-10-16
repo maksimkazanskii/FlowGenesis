@@ -1,20 +1,18 @@
-"""
-train.py
+"""Full-featured FlowGenesis training and N0 ablation runner.
 
-Experiment 0
-
-Training script for the Random Neural Container.
+Faithfully adapted from train_neurogenesis_n0_ablation.py to use
+model_neurogenesis_new.py and config_neurogenesis_new.py.
+Run: python -u -m src_self_organization.train_neurogenesis_new --dataset cifar10 --hidden_neurons 50 --seed 0
 """
 import gc
 import random
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets
 from torchvision.transforms import ToTensor
-from .config import Config
-from .model_neurogenesis import NeuralContainer
+from .model_neurogenesis_new import NeuralContainer
 import argparse
 from pathlib import Path
 
@@ -29,7 +27,8 @@ def set_seed(seed):
     np.random.seed(seed)
 
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -42,15 +41,15 @@ def set_seed(seed):
 def get_dataloaders(cfg):
 
     if cfg.dataset.lower() == "mnist":
-
         dataset_class = datasets.MNIST
 
     elif cfg.dataset.lower() == "fashionmnist":
-
         dataset_class = datasets.FashionMNIST
 
-    else:
+    elif cfg.dataset.lower() == "cifar10":
+        dataset_class = datasets.CIFAR10
 
+    else:
         raise ValueError(
             f"Unknown dataset: {cfg.dataset}"
         )
@@ -69,6 +68,7 @@ def get_dataloaders(cfg):
         transform=ToTensor(),
     )
 
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.batch_size,
@@ -83,6 +83,7 @@ def get_dataloaders(cfg):
         num_workers=cfg.num_workers,
     )
 
+
     return train_loader, test_loader
 
 
@@ -90,7 +91,7 @@ def get_dataloaders(cfg):
 # Training
 # ============================================================
 
-def train_epoch(model, loader, optimizer, criterion, device):
+def train_epoch(model, loader, optimizer, criterion, device, cfg, on_structure=None):
 
     model.train()
 
@@ -106,22 +107,24 @@ def train_epoch(model, loader, optimizer, criterion, device):
         optimizer.zero_grad(set_to_none=True)
 
         logits = model(images)
-
         loss = criterion(logits, labels)
 
         loss.backward()
-
         optimizer.step()
+
+        if on_structure is not None and model.window_examples >= cfg.structure_check_every_examples:
+            optimizer = on_structure(optimizer)
 
         total_loss += loss.item()
 
         pred = logits.argmax(1)
-
         correct += (pred == labels).sum().item()
-
         total += labels.size(0)
 
-    return total_loss / len(loader), 100.0 * correct / total
+        # Release batch tensors as soon as possible
+        del images, labels, logits, loss, pred
+
+    return total_loss / len(loader), 100.0 * correct / total, optimizer
 
 
 # ============================================================
@@ -143,16 +146,16 @@ def evaluate(model, loader, criterion, device):
         labels = labels.to(device)
 
         logits = model(images)
-
         loss = criterion(logits, labels)
 
         total_loss += loss.item()
 
         pred = logits.argmax(1)
-
         correct += (pred == labels).sum().item()
-
         total += labels.size(0)
+
+        # Release batch tensors
+        del images, labels, logits, loss, pred
 
     return total_loss / len(loader), 100.0 * correct / total
 
@@ -170,15 +173,22 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=["fashionmnist", "cifar10", "mnist"],
+        required=True,
+    )
+
+    parser.add_argument(
         "--hidden_neurons",
         type=int,
-        default=None,
+        required=True,
     )
 
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=1,
     )
 
     args = parser.parse_args()
@@ -187,15 +197,35 @@ def main():
     # Configuration
     # ============================================================
 
+    from .config_fm import Config
+
     cfg = Config()
 
-    if args.hidden_neurons is not None:
-        cfg.hidden_neurons = args.hidden_neurons
+    cfg.dataset = args.dataset
+    cfg.hidden_neurons = args.hidden_neurons
+    cfg.seed = args.seed
+    cfg.input_dim = 3 * 32 * 32 if args.dataset == "cifar10" else 28 * 28
 
-    if args.seed is not None:
-        cfg.seed = args.seed
 
     set_seed(cfg.seed)
+
+    # CUDA -> MPS -> CPU
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
+    cfg.device = str(device)
+
+    print(
+        f"Dataset={cfg.dataset} | "
+        f"N0={cfg.hidden_neurons} | "
+        f"Rate={cfg.max_births_per_epoch} | "
+        f"Seed={cfg.seed} | "
+        f"Device={device}"
+    )
 
     device = torch.device(cfg.device)
 
@@ -204,6 +234,36 @@ def main():
     # ============================================================
 
     train_loader, test_loader = get_dataloaders(cfg)
+    # Preserve epoch-equivalent structural timing, measured in examples.
+
+
+    #cfg.configure_for_training_samples(len(train_loader.dataset))
+    print(f"Structural timing (examples): birth={cfg.birth_persistence}, "
+          f"death={cfg.death_persistence}, warmup={cfg.structure_warmup_examples}, "
+          f"cooldown={cfg.structure_cooldown_examples}, "
+          f"check={cfg.structure_check_every_examples}", flush=True)
+
+    # ============================================================
+    # Fixed probe set (retained for compatibility with original trainer).
+    # ============================================================
+
+    probe_size = min(512, len(train_loader.dataset))
+
+    probe_dataset = Subset(
+        train_loader.dataset,
+        list(range(probe_size)),
+    )
+
+    probe_loader = DataLoader(
+        probe_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+    )
+
+    # ============================================================
+    # Model
+    # ============================================================
 
     # ============================================================
     # Model
@@ -224,7 +284,7 @@ def main():
     # ============================================================
 
     save_dir = (
-            Path("data/so/neurogenesis")
+            Path(cfg.output_dir)
             / cfg.dataset.lower()
             / f"neurons_{cfg.hidden_neurons}"
             / f"seed_{cfg.seed}"
@@ -262,19 +322,71 @@ def main():
     # ============================================================
     # Training
     # ============================================================
+    train_loss_history = []
+    train_acc_history = []
+
+    test_loss_history = []
+    test_acc_history = []
+    structure_events = []
+    examples_history = []
+    neuron_history = []
+
+    def save_learning_curves():
+        # Preserve the original filename and fields; refresh after each epoch.
+        payload = {
+            "epoch": list(range(1, len(test_acc_history) + 1)),
+            "examples_seen": examples_history,
+            "structure_events": structure_events,
+            "train_loss": train_loss_history,
+            "train_accuracy": train_acc_history,
+            "test_loss": test_loss_history,
+            "test_accuracy": test_acc_history,
+            "num_neurons": neuron_history,
+            "initial_neurons": cfg.hidden_neurons,
+            "rate": cfg.max_births_per_epoch,
+            "seed": cfg.seed,
+        }
+        destination = save_dir / "learning_curves.pt"
+        temporary = save_dir / "learning_curves.pt.tmp"
+        torch.save(payload, temporary)
+        temporary.replace(destination)
+
+    def structural_check(current_optimizer):
+        stats = model.end_epoch()  # aggregates the latest example window
+        update = model.apply_structural_updates()
+        structure_events.append({
+            "examples_seen": model.examples_seen,
+            "flux": stats["network_mean_flux"],
+            "births": update.births,
+            "deaths": update.deaths,
+            "neurons": update.after,
+        })
+        if update.changed:
+            del current_optimizer
+            new_optimizer = torch.optim.Adam(
+                model.parameters(),
+                lr=cfg.learning_rate,
+                weight_decay=cfg.weight_decay,
+            )
+            return new_optimizer
+
+        return current_optimizer
 
     for epoch in range(cfg.epochs):
+        model.current_epoch = epoch + 1
 
         # --------------------------------------------------------
         # Train
         # --------------------------------------------------------
 
-        train_loss, train_acc = train_epoch(
+        train_loss, train_acc, optimizer = train_epoch(
             model,
             train_loader,
             optimizer,
             criterion,
             device,
+            cfg,
+            structural_check,
         )
 
         # --------------------------------------------------------
@@ -290,7 +402,11 @@ def main():
             criterion,
             device,
         )
+        train_loss_history.append(float(train_loss))
+        train_acc_history.append(float(train_acc))
 
+        test_loss_history.append(float(test_loss))
+        test_acc_history.append(float(test_acc))
         # --------------------------------------------------------
         # Snapshot current evaluated architecture
         # --------------------------------------------------------
@@ -323,6 +439,7 @@ def main():
                     "initial_hidden_neurons": cfg.hidden_neurons,
 
                     "epoch": best_epoch,
+                    "examples_seen": model.examples_seen,
 
                     "test_acc": best_acc,
                     "test_loss": best_loss,
@@ -357,39 +474,23 @@ def main():
         # End-of-epoch flux statistics
         # --------------------------------------------------------
 
-        stats = model.end_epoch()
-
         # --------------------------------------------------------
-        # Neurogenesis / pruning
+        # Fixed-probe representation Flux
         # --------------------------------------------------------
 
-        # --------------------------------------------------------
-        # Neurogenesis / pruning
-        # --------------------------------------------------------
-
-        update = model.apply_structural_updates()
 
         # --------------------------------------------------------
-        # Recreate optimizer if network structure changed
+        # End-of-epoch statistics
         # --------------------------------------------------------
 
-        if update.changed:
-
-            # Explicitly release the old optimizer and its state.
-            # Structural changes replace model parameters, so the old
-            # Adam state is no longer needed.
-            del optimizer
-
-            gc.collect()
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            optimizer = torch.optim.Adam(
-                model.parameters(),
-                lr=cfg.learning_rate,
-                weight_decay=cfg.weight_decay,
-            )
+        # Structural checks are performed during train_epoch, not here.
+        # Keep the residual window for the next epoch.
+        update_events = [e for e in structure_events if e["examples_seen"] >
+                         (examples_history[-1] if examples_history else 0)]
+        births_this_epoch = sum(e["births"] for e in update_events)
+        deaths_this_epoch = sum(e["deaths"] for e in update_events)
+        examples_history.append(model.examples_seen)
+        neuron_history.append(model.num_neurons)
 
         # --------------------------------------------------------
         # Print epoch statistics
@@ -403,25 +504,28 @@ def main():
             f"Epoch {epoch+1:02d}/{cfg.epochs} | "
             f"Train {train_acc:.2f}% | "
             f"Test {test_acc:.2f}% | "
-            f"Flux {stats['network_mean_flux']:.4f} | "
-            f"Birth {update.births} | "
-            f"Pruned {update.deaths} | "
-            f"Alive {update.after} | "
+            f"Examples {model.examples_seen} | "
+            f"Birth {births_this_epoch} | "
+            f"Pruned {deaths_this_epoch} | "
+            f"Alive {model.num_neurons} | "
             f"Total Born {len(model.birth_history)} | "
-            f"Total Pruned {len(model.death_history)}"
+            f"Total Pruned {len(model.death_history)}",
+            flush=True,
         )
+        # Make completed epochs available to visualization immediately.
+        save_learning_curves()
+
         # --------------------------------------------------------
         # Memory cleanup
         # --------------------------------------------------------
 
         del train_loss, train_acc
         del test_loss, test_acc
-        del stats, update
 
-        gc.collect()
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        cleanup_memory(
+            device,
+            clear_cache=(epoch + 1) % 10 == 0,
+        )
 
     # ============================================================
     # Save final developmental statistics
@@ -430,6 +534,7 @@ def main():
     model.save_statistics(
         save_dir / "statistics.pt"
     )
+    save_learning_curves()
 
     # ============================================================
     # Save final POST-UPDATE network
@@ -451,6 +556,7 @@ def main():
 
             "total_born": len(model.birth_history),
             "total_pruned": len(model.death_history),
+            "examples_seen": model.examples_seen,
         },
         save_dir / "final_model.pt",
         )
@@ -464,7 +570,8 @@ def main():
         "dataset": cfg.dataset,
         "seed": cfg.seed,
         "initial_neurons": cfg.hidden_neurons,
-
+        "max_births_per_epoch": cfg.max_births_per_epoch,
+        "max_deaths_per_epoch": cfg.max_deaths_per_epoch,
         # --------------------------------------------------------
         # Best evaluated state
         # --------------------------------------------------------
@@ -485,6 +592,8 @@ def main():
         "final_accuracy": final_test_acc,
         "final_loss": final_test_loss,
         "final_epoch": cfg.epochs,
+        "final_examples_seen": model.examples_seen,
+        "structure_events": structure_events,
 
         "final_neurons": final_neurons,
 
@@ -539,6 +648,15 @@ def main():
 
     print("========================================")
 
+def cleanup_memory(device, clear_cache=False):
+    gc.collect()
 
+    if clear_cache:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        elif device.type == "mps":
+            torch.mps.empty_cache()
+        elif device.type == "mps":
+            torch.mps.empty_cache()
 if __name__ == "__main__":
     main()

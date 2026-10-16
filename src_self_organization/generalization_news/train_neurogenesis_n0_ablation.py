@@ -11,8 +11,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from torchvision import datasets
-from torchvision.transforms import ToTensor
 from ..model_neurogenesis_new import NeuralContainer
 import argparse
 from pathlib import Path
@@ -39,51 +37,81 @@ def set_seed(seed):
 # ============================================================
 
 def get_dataloaders(cfg):
+    """Load AG News and represent text with train-fitted sparse TF-IDF."""
+    from functools import partial
+    from scipy import sparse
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from torch.utils.data import Dataset
+    from datasets import load_dataset
+    import joblib
 
-    if cfg.dataset.lower() == "mnist":
-        dataset_class = datasets.MNIST
+    class SparseTextDataset(Dataset):
+        def __init__(self, matrix, labels):
+            self.matrix = matrix.tocsr()
+            self.labels = np.asarray(labels, dtype=np.int64)
 
-    elif cfg.dataset.lower() == "fashionmnist":
-        dataset_class = datasets.FashionMNIST
+        def __len__(self):
+            return len(self.labels)
 
-    elif cfg.dataset.lower() == "cifar10":
-        dataset_class = datasets.CIFAR10
+        def __getitem__(self, idx):
+            return int(idx), int(self.labels[idx])
 
+    def collate_sparse(batch, *, dataset):
+        indices, labels = zip(*batch)
+        # Densify only the current mini-batch, never the entire dataset.
+        features = dataset.matrix[list(indices)].toarray().astype(np.float32)
+        return torch.from_numpy(features), torch.tensor(labels, dtype=torch.long)
+
+    cache_dir = Path(cfg.text_cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = f"tfidf_{cfg.tfidf_max_features}_ngram{cfg.tfidf_ngram_max}"
+    train_path = cache_dir / f"{cache_key}_train.npz"
+    test_path = cache_dir / f"{cache_key}_test.npz"
+    labels_path = cache_dir / f"{cache_key}_labels.npz"
+    vectorizer_path = cache_dir / f"{cache_key}_vectorizer.joblib"
+
+    if all(p.exists() for p in (train_path, test_path, labels_path, vectorizer_path)):
+        print(f"Loading cached AG News TF-IDF from {cache_dir}", flush=True)
+        X_train = sparse.load_npz(train_path)
+        X_test = sparse.load_npz(test_path)
+        with np.load(labels_path) as saved:
+            y_train = saved["train"]
+            y_test = saved["test"]
     else:
-        raise ValueError(
-            f"Unknown dataset: {cfg.dataset}"
+        print("Downloading AG News and fitting training-only TF-IDF...", flush=True)
+        raw = load_dataset("ag_news")
+        vectorizer = TfidfVectorizer(
+            max_features=cfg.tfidf_max_features,
+            ngram_range=(1, cfg.tfidf_ngram_max),
+            dtype=np.float32,
+            sublinear_tf=True,
+            lowercase=True,
         )
+        X_train = vectorizer.fit_transform(raw["train"]["text"]).tocsr()
+        X_test = vectorizer.transform(raw["test"]["text"]).tocsr()
+        y_train = np.asarray(raw["train"]["label"], dtype=np.int64)
+        y_test = np.asarray(raw["test"]["label"], dtype=np.int64)
+        sparse.save_npz(train_path, X_train)
+        sparse.save_npz(test_path, X_test)
+        np.savez(labels_path, train=y_train, test=y_test)
+        joblib.dump(vectorizer, vectorizer_path)
 
-    train_dataset = dataset_class(
-        "./data",
-        train=True,
-        download=True,
-        transform=ToTensor(),
-    )
-
-    test_dataset = dataset_class(
-        "./data",
-        train=False,
-        download=True,
-        transform=ToTensor(),
-    )
-
-
+    if X_train.shape[1] != cfg.input_dim:
+        raise ValueError(
+            f"TF-IDF has {X_train.shape[1]} features but config input_dim={cfg.input_dim}"
+        )
+    train_dataset = SparseTextDataset(X_train, y_train)
+    test_dataset = SparseTextDataset(X_test, y_test)
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg.batch_size,
-        shuffle=True,
+        train_dataset, batch_size=cfg.batch_size, shuffle=True,
         num_workers=cfg.num_workers,
+        collate_fn=partial(collate_sparse, dataset=train_dataset),
     )
-
     test_loader = DataLoader(
-        test_dataset,
-        batch_size=cfg.batch_size,
-        shuffle=False,
+        test_dataset, batch_size=cfg.batch_size, shuffle=False,
         num_workers=cfg.num_workers,
+        collate_fn=partial(collate_sparse, dataset=test_dataset),
     )
-
-
     return train_loader, test_loader
 
 
@@ -175,7 +203,7 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["fashionmnist", "cifar10"],
+        choices=["agnews"],
         required=True,
     )
 
@@ -197,11 +225,8 @@ def main():
     # Configuration
     # ============================================================
 
-    if args.dataset == "fashionmnist":
-        from ..config import Config
-
-    elif args.dataset == "cifar10":
-        from ..config_cifar import Config
+    if args.dataset == "agnews":
+        from ..config_agnews import Config
 
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
@@ -327,6 +352,7 @@ def main():
     test_acc_history = []
     structure_events = []
     examples_history = []
+    neuron_history = []
 
     def structural_check(current_optimizer):
         stats = model.end_epoch()  # aggregates the latest example window
@@ -339,10 +365,13 @@ def main():
             "neurons": update.after,
         })
         if update.changed:
-            del current_optimizer
-            gc.collect()
-            return torch.optim.Adam(model.parameters(), lr=cfg.learning_rate,
-                                    weight_decay=cfg.weight_decay)
+            new_optimizer = torch.optim.Adam(
+                model.parameters(),
+                lr=cfg.learning_rate,
+                weight_decay=cfg.weight_decay,
+            )
+            return new_optimizer
+
         return current_optimizer
 
     for epoch in range(cfg.epochs):
@@ -463,6 +492,7 @@ def main():
         births_this_epoch = sum(e["births"] for e in update_events)
         deaths_this_epoch = sum(e["deaths"] for e in update_events)
         examples_history.append(model.examples_seen)
+        neuron_history.append(int(model.num_neurons))
 
         # --------------------------------------------------------
         # Print epoch statistics
@@ -489,12 +519,11 @@ def main():
 
         del train_loss, train_acc
         del test_loss, test_acc
-        gc.collect()
 
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        elif device.type == "mps":
-            torch.mps.empty_cache()
+        cleanup_memory(
+            device,
+            clear_cache=(epoch + 1) % 10 == 0,
+        )
 
     # ============================================================
     # Save final developmental statistics
@@ -508,6 +537,7 @@ def main():
             "epoch": list(range(1, cfg.epochs + 1)),
             "examples_seen": examples_history,
             "structure_events": structure_events,
+            "num_neurons": neuron_history,
             "train_loss": train_loss_history,
             "train_accuracy": train_acc_history,
             "test_loss": test_loss_history,
@@ -632,6 +662,13 @@ def main():
 
     print("========================================")
 
+def cleanup_memory(device, clear_cache=False):
+    gc.collect()
 
+    if clear_cache:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        elif device.type == "mps":
+            torch.mps.empty_cache()
 if __name__ == "__main__":
     main()

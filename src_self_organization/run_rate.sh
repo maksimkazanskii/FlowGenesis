@@ -1,147 +1,109 @@
 #!/usr/bin/env bash
+# Rate x initial-size ablation for the rebuilt train_neurogenesis_ablation.py.
+# Run from anywhere: bash src_self_organization/run_rate.sh [start|stop]
+set -Eeuo pipefail
 
-# FlowGenesis structural-rate x initial-size grid ablation
-#
-#   rate = max_births_per_epoch = max_deaths_per_epoch
-#   rate values: 2, 4, 8, 16, 32
-#   N0 values:   10, 20, 40, 80, 160
-#   seeds:       0, 1, 2, 3, 4
-#
-# For each seed and rate, all five N0 values run in parallel.
-# Rates and seeds are processed sequentially.
-#
-# Stop with:
-#   bash src_self_organization/run_rate.sh stop
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_DIR"
 
-set -u
-
-RATE_VALUES=(2 4 8 16 32)
-N0_VALUES=(10 20 40 80 160)
+RATES=(5 1 2.5 10)
+N0_VALUES=(20 40 80 160)
 SEEDS=(0 1 2 3 4)
-
-OUTPUT_ROOT="rate_ablations"
-
-PID_FILE=".rate_ablation.pid"
-CHILD_PID_FILE=".rate_ablation.children"
+DATASET="${DATASET:-fashionmnist}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-data/neurogenesis/rate_ablations}"
+LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/logs}"
+RUN_DIR="${OUTPUT_ROOT}/.run_control"
+PID_FILE="$RUN_DIR/main.pid"
+CHILD_FILE="$RUN_DIR/children.pid"
 
 stop_all() {
-    echo "Stopping rate x N0 ablation..."
-
-    if [[ -f "$CHILD_PID_FILE" ]]; then
-        while read -r PID; do
-            if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-                kill "$PID" 2>/dev/null || true
-            fi
-        done < "$CHILD_PID_FILE"
+    if [[ -f "$CHILD_FILE" ]]; then
+        while IFS= read -r pid; do
+            [[ -n "$pid" ]] || continue
+            # Children are subshells; kill their process group descendants via pkill -P.
+            pkill -TERM -P "$pid" 2>/dev/null || true
+            kill -TERM "$pid" 2>/dev/null || true
+        done < "$CHILD_FILE"
     fi
-
     if [[ -f "$PID_FILE" ]]; then
-        PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-        if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-            kill "$PID" 2>/dev/null || true
-        fi
+        pid="$(cat "$PID_FILE")"
+        [[ "$pid" == "$$" ]] || kill -TERM "$pid" 2>/dev/null || true
     fi
-
-    rm -f "$PID_FILE" "$CHILD_PID_FILE"
-    echo "Stop signal sent to all recorded processes."
-    exit 0
 }
 
-if [[ "${1:-}" == "stop" ]]; then
+if [[ "${1:-start}" == stop ]]; then
+    if [[ ! -f "$PID_FILE" ]]; then
+        echo "No recorded rate-ablation run in $RUN_DIR"
+        exit 0
+    fi
     stop_all
+    echo "Stop requested."
+    exit 0
+fi
+if [[ "${1:-start}" != start ]]; then
+    echo "Usage: bash $0 [start|stop]" >&2
+    exit 2
 fi
 
+mkdir -p "$RUN_DIR" "$LOG_DIR"
 if [[ -f "$PID_FILE" ]]; then
-    OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "Rate x N0 ablation already appears to be running (PID $OLD_PID)."
-        echo "Stop it with: bash $0 stop"
+    old_pid="$(cat "$PID_FILE")"
+    if kill -0 "$old_pid" 2>/dev/null; then
+        echo "Already running with PID $old_pid; use: bash $0 stop" >&2
         exit 1
     fi
 fi
-
-echo "$$" > "$PID_FILE"
-: > "$CHILD_PID_FILE"
-
+printf '%s\n' "$$" > "$PID_FILE"
+: > "$CHILD_FILE"
+children=()
 cleanup() {
-    if [[ -f "$CHILD_PID_FILE" ]]; then
-        while read -r PID; do
-            if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-                kill "$PID" 2>/dev/null || true
-            fi
-        done < "$CHILD_PID_FILE"
-    fi
-
-    rm -f "$PID_FILE" "$CHILD_PID_FILE"
+    trap - EXIT INT TERM
+    for pid in "${children[@]-}"; do
+        pkill -TERM -P "$pid" 2>/dev/null || true
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    rm -f "$PID_FILE" "$CHILD_FILE"
 }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-trap cleanup EXIT INT TERM
-
-echo "============================================================"
-echo "STRUCTURAL RATE x N0 GRID ABLATION"
-echo "Rates : ${RATE_VALUES[*]}"
-echo "N0    : ${N0_VALUES[*]}"
-echo "Seeds : ${SEEDS[*]}"
-echo "Total : $((${#RATE_VALUES[@]} * ${#N0_VALUES[@]} * ${#SEEDS[@]})) runs"
-echo "============================================================"
-
+printf 'Dataset=%s | output=%s | total=%s runs\n' "$DATASET" "$OUTPUT_ROOT" "$((${#RATES[@]} * ${#N0_VALUES[@]} * ${#SEEDS[@]}))"
 for seed in "${SEEDS[@]}"; do
-
-    echo
-    echo "############################################################"
-    echo "SEED $seed"
-    echo "############################################################"
-
-    for rate in "${RATE_VALUES[@]}"; do
-
-        echo
-        echo "============================================================"
-        echo "STARTING rate=$rate, seed=$seed"
-        echo "N0 values in parallel: ${N0_VALUES[*]}"
-        echo "============================================================"
-
-        pids=()
-
+    for rate in "${RATES[@]}"; do
+        echo "=== Starting rate=$rate seed=$seed; ${#N0_VALUES[@]} parallel N0 runs ==="
+        children=()
+        : > "$CHILD_FILE"
         for n0 in "${N0_VALUES[@]}"; do
-
-            python -u -m src_self_organization.train_neurogenesis_ablation \
-                --hidden_neurons "$n0" \
-                --seed "$seed" \
-                --ablation rate \
-                --value "$rate" \
-                --output_dir "${OUTPUT_ROOT}/value_${rate}" \
-                > >(sed -u "s/^/[rate=$rate N0=$n0 seed=$seed] /") 2>&1 &
-
-            child_pid=$!
-            pids+=("$child_pid")
-            echo "$child_pid" >> "$CHILD_PID_FILE"
-
-            echo "Started rate=$rate N0=$n0 seed=$seed PID=$child_pid"
+            log="$LOG_DIR/rate_${rate}_N${n0}_seed${seed}.log"
+            (
+                set -o pipefail
+                python -u -m src_self_organization.train_neurogenesis_ablation \
+                    --dataset "$DATASET" \
+                    --hidden_neurons "$n0" \
+                    --seed "$seed" \
+                    --ablation rate \
+                    --value "$rate" \
+                    --output_dir "$OUTPUT_ROOT" \
+                    2>&1 | tee "$log" | sed -u "s/^/[rate=$rate N0=$n0 seed=$seed] /"
+            ) &
+            pid=$!
+            children+=("$pid")
+            echo "$pid" >> "$CHILD_FILE"
+            echo "Started rate=$rate N0=$n0 seed=$seed PID=$pid"
         done
-
         failed=0
-
-        for pid in "${pids[@]}"; do
-            if ! wait "$pid"; then
-                failed=1
-            fi
+        for pid in "${children[@]-}"; do
+            wait "$pid" || failed=1
         done
-
-        if [[ "$failed" -ne 0 ]]; then
-            echo "ERROR: at least one run failed for rate=$rate seed=$seed."
+        children=()
+        : > "$CHILD_FILE"
+        if (( failed )); then
+            echo "ERROR: one or more runs failed for rate=$rate seed=$seed. See $LOG_DIR" >&2
             exit 1
         fi
-
-        : > "$CHILD_PID_FILE"
-
-        echo "=== rate=$rate seed=$seed FINISHED ==="
+        echo "=== Completed rate=$rate seed=$seed ==="
     done
-
-    echo
-    echo "=== ALL RATES FOR SEED $seed FINISHED ==="
 done
-
-echo
-echo "============================================================"
-echo "ALL RATE x N0 GRID ABLATION RUNS FINISHED"
-echo "============================================================"
+echo "All $((${#RATES[@]} * ${#N0_VALUES[@]} * ${#SEEDS[@]})) rate x N0 experiments completed."

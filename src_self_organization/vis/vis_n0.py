@@ -6,7 +6,7 @@ Creates two separate figures:
   2. Number of neurons vs epoch, mean ± 1 SD across seeds
 
 Conditions:
-  N0 = 10, 20, 40, 80, 160
+  N0 = 20, 40, 80, 160
 Colors:
   20  -> red
   40  -> steelblue
@@ -22,18 +22,25 @@ and the script prints a precise warning for the neuron plot.
 """
 
 from pathlib import Path
+import argparse
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-ROOT = Path("data/neurogenesis") / "N0_ablation"
-OUT = ROOT / "plots"
+parser = argparse.ArgumentParser(description="Plot N0 ablation results, including partial runs")
+parser.add_argument("--folder", "--root", dest="folder", type=Path,
+                    default=Path("data/neurogenesis/fashionmnist"),
+                    help="Folder containing neurons_<N0>/seed_<seed>/ directories")
+parser.add_argument("--out", type=Path, default=None,
+                    help="Output plot directory (default: <folder>/plots)")
+args = parser.parse_args()
+ROOT = args.folder.expanduser()
+OUT = args.out.expanduser() if args.out is not None else ROOT / "plots"
 OUT.mkdir(parents=True, exist_ok=True)
 
-N0_VALUES = [10, 20, 40, 80, 160]
+N0_VALUES = [20, 40, 80, 160]
 
 COLORS = {
-    10: "lightsteelblue",
     20: "steelblue",
     40: "#35688f",
     80: "#234a68",
@@ -100,7 +107,7 @@ def recover_neuron_history(run_dir, curve):
 
 def find_run_dirs(n0):
     # New N0-ablation layout:
-    # data/neurogenesis/N0_ablation/neurons_<N0>/seed_<seed>/
+    # data/neurogenesis/fashionmnist/neurons_<N0>/seed_<seed>/
     primary = ROOT / f"neurons_{n0}"
     dirs = sorted(primary.glob("seed_*"))
     return sorted(
@@ -112,7 +119,7 @@ def find_run_dirs(n0):
 def load_condition(n0):
     run_dirs = find_run_dirs(n0)
     if not run_dirs:
-        print(f"[WARN] N0={n0}: no completed runs found")
+        print(f"[WARN] N0={n0}: no saved learning curves found")
         return None
 
     acc_runs = []
