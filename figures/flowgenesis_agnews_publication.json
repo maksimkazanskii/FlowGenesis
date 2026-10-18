@@ -1,0 +1,16 @@
+{
+  "representative_model": "/Users/maksimkazanskii2/Desktop/interferenceNN/data/neurogenesis/agnews/neurons_40/seed_3/final_model.pt",
+  "selection_method": "filename_fallback",
+  "probe_seed": 20260829,
+  "n_probe": 2000,
+  "cluster_training_probes": 1000,
+  "heldout_probes": 1000,
+  "edge_quantile": 0.9,
+  "cluster_metrics": {
+    "within": 0.35760223865509033,
+    "between": -0.06843205541372299,
+    "delta": 0.4260342940688133,
+    "permutation_p": 0.000999000999000999,
+    "n_permutations": 1000
+  }
+}

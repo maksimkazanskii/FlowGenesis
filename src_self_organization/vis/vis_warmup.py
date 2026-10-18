@@ -61,19 +61,25 @@ def neuron_history(folder, curve):
 
 
 def extract_metadata(path):
-    """Extract parameters from any directory component, not only fixed ordering."""
-    components = [p.lower() for p in path.parts]
-    text = '/'.join(components)
-    patterns = {
-        'warmup': r'(?:warm[_-]?up|warmup)[_=-]?(\d+)',
-        'n0': r'(?:neurons|n0|hidden[_-]?neurons)[_=-]?(\d+)',
-        'seed': r'seed[_=-]?(\d+)',
+    """Parse both warmup_50000 and warmup/value_50000 layouts."""
+    parts = [part.lower() for part in path.parts]
+    text = '/'.join(parts)
+    warmup = None
+    for i, part in enumerate(parts):
+        match = re.fullmatch(r'warmup[_=-]?(\d+)', part)
+        if match:
+            warmup = int(match.group(1))
+        elif part == 'warmup' and i + 1 < len(parts):
+            match = re.fullmatch(r'value[_=-]?(\d+)', parts[i + 1])
+            if match:
+                warmup = int(match.group(1))
+    neuron_matches = re.findall(r'(?:neurons|n0|hidden[_-]?neurons)[_=-]?(\d+)', text)
+    seed_matches = re.findall(r'seed[_=-]?(\d+)', text)
+    return {
+        'warmup': warmup,
+        'n0': int(neuron_matches[-1]) if neuron_matches else None,
+        'seed': int(seed_matches[-1]) if seed_matches else None,
     }
-    found = {}
-    for name, pattern in patterns.items():
-        matches = re.findall(pattern, text)
-        found[name] = int(matches[-1]) if matches else None
-    return found
 
 
 def discover(root):

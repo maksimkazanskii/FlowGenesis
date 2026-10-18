@@ -8,10 +8,10 @@ Creates two separate figures:
 Conditions:
   N0 = 20, 40, 80, 160
 Colors:
-  20  -> red
+  20  -> black
   40  -> steelblue
   80  -> orange
-  160 -> darkorange
+  160 -> red
 
 The script supports either:
   A) learning_curves.pt containing per-epoch "epoch", "test_accuracy", and "num_neurons", OR
@@ -41,10 +41,10 @@ OUT.mkdir(parents=True, exist_ok=True)
 N0_VALUES = [20, 40, 80, 160]
 
 COLORS = {
-    20: "steelblue",
-    40: "#35688f",
-    80: "#234a68",
-    160: "#102f46",
+    20: "black",
+    40: "steelblue",
+    80: "orange",
+    160: "red",
 }
 
 

@@ -12,7 +12,7 @@ Writes only:
 
 Usage:
     python src_self_organization/stats/aggregate_stats.py \
-        data/neurogenesis/N0_ablation
+        data/neurogenesis/fashionmnist
 """
 
 import argparse
@@ -211,43 +211,40 @@ def main():
         ["source_n0", "initial_neurons", "initial_n", "n0"]
     )
 
-    # The comparative script creates model-level scores. Prefer explicit
-    # cross-N0 columns if present.
-    cka_col = find_column(
-        comp,
-        ["cross_n0_cka", "mean_cross_n0_cka", "cka"],
-        required=False,
-    )
-    agreement_col = find_column(
-        comp,
-        ["cross_n0_prediction_agreement",
-         "mean_cross_n0_prediction_agreement",
-         "prediction_agreement"],
-        required=False,
-    )
-    hungarian_col = find_column(
-        comp,
-        ["cross_n0_hungarian_weight_similarity",
-         "mean_cross_n0_hungarian_weight_similarity",
-         "hungarian_weight_similarity",
-         "hungarian_similarity", "weight_similarity"],
-        required=False,
-    )
+    # Each model contributes one within-N0 and one cross-N0 score.
+    # This avoids treating overlapping model pairs as independent replicates.
+    similarity_columns = {}
+    metric_aliases = {
+        "cka": ["cka"],
+        "agreement": ["prediction_agreement", "agreement"],
+        "weight": ["hungarian_weight_similarity", "hungarian_similarity", "weight_similarity"],
+    }
+    for metric, aliases in metric_aliases.items():
+        for comparison, prefixes in {
+            "within": ["within_n0", "same_n0", "intra_n0"],
+            "cross": ["cross_n0", "between_n0", "inter_n0"],
+        }.items():
+            candidates = [f"{prefix}_{alias}" for prefix in prefixes for alias in aliases]
+            candidates += [f"mean_{candidate}" for candidate in candidates]
+            similarity_columns[(comparison, metric)] = find_column(
+                comp, candidates, required=False
+            )
 
-    # Some versions store rows by comparison type.
-    pair_type_col = find_column(
-        comp, ["pair_type", "comparison_type", "target_type"], required=False
-    )
-    if pair_type_col is not None:
-        mask = comp[pair_type_col].astype(str).str.lower().str.contains("cross")
-        if mask.any():
-            comp = comp[mask].copy()
-
-    if cka_col is None or agreement_col is None:
+    required = [(comparison, metric) for comparison in ("within", "cross")
+                for metric in ("cka", "agreement", "weight")]
+    missing = [f"{comparison}/{metric}" for comparison, metric in required
+               if similarity_columns[(comparison, metric)] is None]
+    if missing:
         raise KeyError(
-            "Could not identify CKA/prediction-agreement columns in "
-            f"{comparative_path.name}. Columns are: {list(comp.columns)}"
+            "Missing model-level similarity columns for: " + ", ".join(missing)
+            + f". Available columns in {comparative_path.name}: {list(comp.columns)}. "
+              "Regenerate comparative_metrics_model_level.csv using the comparative "
+              "statistics script, or check its within/cross column names."
         )
+
+    comp_seed = find_column(comp, ["source_seed", "seed"], required=False)
+    if comp_seed is not None:
+        comp = comp.drop_duplicates(subset=[comp_n0, comp_seed], keep="last")
 
     n0_values = sorted(
         pd.to_numeric(train[train_n0], errors="coerce").dropna().astype(int).unique()
@@ -276,19 +273,20 @@ def main():
         density = mean_sd(s[density_col])
         rho = mean_sd(s[rho_col])
         edges = mean_sd(s[edges_col])
-        cka = mean_sd(c[cka_col])
-        agreement = mean_sd(c[agreement_col])
-        hungarian = (
-            mean_sd(c[hungarian_col])
-            if hungarian_col is not None
-            else (np.nan, np.nan)
-        )
+        similarities = {}
+        for comparison in ("within", "cross"):
+            for metric in ("weight", "cka", "agreement"):
+                similarities[(comparison, metric)] = mean_sd(
+                    c[similarity_columns[(comparison, metric)]]
+                )
 
-        # Prediction agreement is normally stored as [0, 1].
-        # If it is already percentages, don't multiply by 100.
-        agreement_scale = 100.0
-        if np.isfinite(agreement[0]) and agreement[0] > 1.0:
-            agreement_scale = 1.0
+        # Agreement may be stored as a fraction or percentage.
+        agreement_scales = {}
+        for comparison in ("within", "cross"):
+            avg = similarities[(comparison, "agreement")][0]
+            agreement_scales[comparison] = (
+                100.0 if np.isfinite(avg) and avg <= 1.0 else 1.0
+            )
 
         # Accuracy from stats.py is normally already percentage units.
         best_acc_scale = 100.0 if np.isfinite(best_acc[0]) and best_acc[0] <= 1 else 1.0
@@ -307,9 +305,13 @@ def main():
             fmt(*edges, decimals=1),
             fmt(*density, decimals=3),
             fmt(*rho, decimals=3),
-            fmt(*hungarian, decimals=3),
-            fmt(*cka, decimals=3),
-            fmt(*agreement, decimals=1, scale=agreement_scale),
+            *[
+                fmt(*similarities[(comparison, metric)],
+                    decimals=1 if metric == "agreement" else 3,
+                    scale=agreement_scales[comparison] if metric == "agreement" else 1.0)
+                for comparison in ("within", "cross")
+                for metric in ("weight", "cka", "agreement")
+            ],
         ])
 
     # Separate tests for each descriptor used in the structural claim.
@@ -340,21 +342,22 @@ def main():
     lines = [
         r"\begin{table*}[t]",
         r"\centering",
-        r"\caption{Effect of initial network size $N_0$ on the structural and functional properties of FlowGenesis on FashionMNIST. Values are mean $\pm$ standard deviation across seeds.}",
+        r"\caption{Effect of initial network size $N_0$ on the structural and functional properties of FlowGenesis on FashionMNIST. Values are mean $\pm$ standard deviation across seeds; similarity statistics are aggregated at the model level.}",
         r"\label{tab:n0_ablation}",
         r"\resizebox{\textwidth}{!}{%",
-        r"\begin{tabular}{c cc cc cc ccc ccc}",
+        r"\begin{tabular}{c cc cc cc ccc ccc ccc}",
         r"\toprule",
         r"& \multicolumn{2}{c}{Network size}",
         r"& \multicolumn{2}{c}{Performance}",
         r"& \multicolumn{2}{c}{Structural dynamics}",
         r"& \multicolumn{3}{c}{Final structure}",
-        r"& \multicolumn{3}{c}{Cross-run similarity} \\",
+        r"& \multicolumn{3}{c}{Within-$N_0$ similarity} & \multicolumn{3}{c}{Cross-$N_0$ similarity} \\",
         r"\cmidrule(lr){2-3}",
         r"\cmidrule(lr){4-5}",
         r"\cmidrule(lr){6-7}",
         r"\cmidrule(lr){8-10}",
         r"\cmidrule(lr){11-13}",
+        r"\cmidrule(lr){14-16}",
         r"$N_0$",
         r"& $N_{\mathrm{best}}$",
         r"& $N_f$",
@@ -367,6 +370,9 @@ def main():
         r"& $\rho$",
         r"& Weight sim.",
         r"& CKA",
+        r"& Agreement (\%)",
+        r"& Weight sim.",
+        r"& CKA",
         r"& Agreement (\%) \\",
         r"\midrule",
     ]
@@ -376,18 +382,18 @@ def main():
 
     lines += [
         r"\bottomrule",
-        r"\\end{tabular}%",
+        r"\end{tabular}%",
         r"}",
-        r"\\vspace{2pt}",
-        r"\\begin{minipage}{\\textwidth}",
-        r"\\footnotesize",
-        r"\\textit{Dependence of final structure on $N_0$:} separate Welch "
-        r"one-way ANOVAs for $N_f$, $E_f$, density, and $\\rho$, with Holm "
+        r"\vspace{2pt}",
+        r"\begin{minipage}{\textwidth}",
+        r"\footnotesize",
+        r"\textit{Dependence of final structure on $N_0$:} separate Welch "
+        r"one-way ANOVAs for $N_f$, $E_f$, density, and $\rho$, with Holm "
         r"correction across the four tests. Adjusted $p$-values: "
         + ", ".join(f"{x['label']} {fmt_p(x['p_holm'])}" for x in structural_tests)
         + r".",
-        r"\\end{minipage}",
-        r"\\end{table*}",
+        r"\end{minipage}",
+        r"\end{table*}",
         "",
         ]
 
@@ -401,12 +407,6 @@ def main():
     )
     if missing_final:
         print(f"WARNING: final accuracy could not be parsed for {missing_final} run(s).")
-
-    if hungarian_col is None:
-        print(
-            "WARNING: no Hungarian weight-similarity column found; "
-            "Weight sim. is written as '--'."
-        )
 
     print("\nStructural N0 tests:")
     for result in structural_tests:

@@ -92,9 +92,9 @@ class Config:
     # Structural limits
     # ------------------------------------------------------------
 
-    min_neurons: int = 20
+    min_neurons: int = 40
 
-    max_neurons: int = 900
+    max_neurons: int = 1600
 
     structure_warmup_examples: int = 20000
 

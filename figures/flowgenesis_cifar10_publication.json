@@ -1,0 +1,16 @@
+{
+  "representative_model": "/Users/maksimkazanskii2/Desktop/interferenceNN/data/neurogenesis/cifar10/so/n0_ablation/cifar10/neurons_200/seed_4/final_model.pt",
+  "selection_method": "cka_medoid",
+  "probe_seed": 20260829,
+  "n_probe": 2000,
+  "cluster_training_probes": 1000,
+  "heldout_probes": 1000,
+  "edge_quantile": 0.9,
+  "cluster_metrics": {
+    "within": 0.14264734089374542,
+    "between": -0.02521534636616707,
+    "delta": 0.1678626872599125,
+    "permutation_p": 0.000999000999000999,
+    "n_permutations": 1000
+  }
+}

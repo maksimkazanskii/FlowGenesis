@@ -1,0 +1,16 @@
+{
+  "representative_model": "/Users/maksimkazanskii2/Desktop/interferenceNN/data/neurogenesis/fashionmnist/neurons_80/seed_0/final_model.pt",
+  "selection_method": "filename_fallback",
+  "probe_seed": 20260829,
+  "n_probe": 2000,
+  "cluster_training_probes": 1000,
+  "heldout_probes": 1000,
+  "edge_quantile": 0.9,
+  "cluster_metrics": {
+    "within": 0.5804384350776672,
+    "between": -0.15680766105651855,
+    "delta": 0.7372460961341858,
+    "permutation_p": 0.000999000999000999,
+    "n_permutations": 1000
+  }
+}
