@@ -1,157 +1,148 @@
-"""Plot FlowGenesis connectivity (beta) ablation at fixed N0 across seeds.
+#!/usr/bin/env python3
+"""Plot FashionMNIST connectivity (beta) ablation: accuracy and neuron count.
 
-Expected directory layout (from train_neurogenesis_ablation.py):
-  ROOT/fashionmnist/beta/value_0.1/neurons_20/seed_0/learning_curves.pt
-
-Also accepts ROOT already pointing at fashionmnist/, beta/, or value_* parent.
-Reads partial learning_curves.pt files saved after each epoch.
+For each N0, overlay beta=0.1,0.2,0.4,0.8 with mean +/- SD across seeds.
+Supports partial runs by interpolating onto the shared observed epoch grid.
 """
-from pathlib import Path
 import argparse
+from pathlib import Path
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
+COLORS = {0.1: 'black', 0.2: 'steelblue', 0.4: 'orange', 0.8: 'red'}
 
-def parse_args():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--folder', '--root', dest='folder', type=Path,
-                   default=Path('data/neurogenesis/beta_ablation'))
-    p.add_argument('--dataset', default='fashionmnist')
-    p.add_argument('--n0', type=int, default=20)
-    p.add_argument('--betas', type=float, nargs='+', default=[0.1, 0.2, 0.4, 0.8])
-    p.add_argument('--seeds', type=int, nargs='+', default=[0, 1, 2, 3, 4])
-    p.add_argument('--out', type=Path, default=None)
-    return p.parse_args()
-
-
-def vector(x):
+def array(x):
     if x is None:
         return None
     if torch.is_tensor(x):
         x = x.detach().cpu().numpy()
     try:
         a = np.asarray(x, dtype=float).reshape(-1)
+        return a if a.size else None
     except (ValueError, TypeError):
         return None
-    return a if a.size else None
 
-
-def locate(root, dataset, beta, n0, seed):
-    value = f'value_{beta:g}'
-    suffix = Path(value) / f'neurons_{n0}' / f'seed_{seed}' / 'learning_curves.pt'
-    bases = [root / dataset / 'beta', root / 'beta', root]
-    for base in bases:
-        candidate = base / suffix
-        if candidate.is_file():
-            return candidate
+def neurons(run, curves):
+    for key in ('num_neurons', 'neurons', 'neuron_history', 'population'):
+        a = array(curves.get(key))
+        if a is not None:
+            return a
+    path = run / 'statistics.pt'
+    if not path.exists():
+        return None
+    stats = torch.load(path, map_location='cpu', weights_only=False)
+    if not isinstance(stats, dict):
+        return None
+    for key in ('neurons', 'neuron_history', 'num_neurons_history', 'population',
+                'population_history', 'alive_history'):
+        a = array(stats.get(key))
+        if a is not None:
+            return a
+    for key in ('history', 'epoch_history', 'development_history'):
+        rows = stats.get(key)
+        if isinstance(rows, (list, tuple)) and rows and isinstance(rows[0], dict):
+            for field in ('neurons', 'num_neurons', 'population', 'alive'):
+                if all(field in row for row in rows):
+                    return array([row[field] for row in rows])
     return None
 
-
-def load_run(path):
-    try:
-        payload = torch.load(path, map_location='cpu', weights_only=False)
-        if not isinstance(payload, dict):
-            raise ValueError('expected dictionary')
-        epochs = vector(payload.get('epoch'))
-        accuracy = vector(payload.get('test_accuracy'))
-        neurons = None
-        for key in ('num_neurons', 'neurons', 'neuron_history', 'population'):
-            neurons = vector(payload.get(key))
-            if neurons is not None:
-                break
-        if epochs is None or accuracy is None:
-            raise ValueError('missing epoch or test_accuracy')
-        n = min(len(epochs), len(accuracy))
-        if neurons is not None:
-            n = min(n, len(neurons))
-        epochs, accuracy = epochs[:n], accuracy[:n]
-        neurons = neurons[:n] if neurons is not None else None
-        valid = np.isfinite(epochs) & np.isfinite(accuracy)
-        if neurons is not None:
-            valid &= np.isfinite(neurons)
-        return epochs[valid], accuracy[valid], (neurons[valid] if neurons is not None else None)
-    except Exception as e:
-        print(f'[WARN] Cannot load {path}: {e}')
-        return None
-
-
-def aggregate(runs, metric):
-    # Align by actual epoch number. Missing and shorter seeds contribute only
-    # to epochs they contain; no artificial truncation to the shortest run.
-    by_epoch = {}
-    for epochs, acc, neurons in runs:
-        values = acc if metric == 'accuracy' else neurons
-        if values is None:
+def collect(root, beta, n0, metric):
+    folder = root / f'value_{beta:g}' / f'neurons_{n0}'
+    series = []
+    for run in sorted(folder.glob('seed_*')):
+        path = run / 'learning_curves.pt'
+        if not path.exists():
             continue
-        for epoch, value in zip(epochs, values):
-            by_epoch.setdefault(int(epoch), []).append(float(value))
-    if not by_epoch:
+        try:
+            curves = torch.load(path, map_location='cpu', weights_only=False)
+            if not isinstance(curves, dict):
+                raise ValueError('learning_curves.pt is not a dictionary')
+            y = array(curves.get('test_accuracy')) if metric == 'accuracy' else neurons(run, curves)
+            if y is None:
+                continue
+            x = array(curves.get('epoch'))
+            if x is None:
+                x = np.arange(len(y), dtype=float)
+            n = min(len(x), len(y))
+            x, y = x[:n], y[:n]
+            good = np.isfinite(x) & np.isfinite(y)
+            x, y = x[good], y[good]
+            if not len(x):
+                continue
+            order = np.argsort(x)
+            x, y = x[order], y[order]
+            x, indices = np.unique(x, return_index=True)
+            y = y[indices]
+            series.append((x, y))
+        except Exception as exc:
+            print(f'[WARN] {run}: {exc}')
+    if not series:
         return None
-    xs = np.array(sorted(by_epoch))
-    means = np.array([np.mean(by_epoch[e]) for e in xs])
-    stds = np.array([np.std(by_epoch[e], ddof=1) if len(by_epoch[e]) > 1 else 0.
-                     for e in xs])
-    counts = np.array([len(by_epoch[e]) for e in xs])
-    return xs, means, stds, counts
-
-
-def plot(results, betas, metric, ylabel, out, n0):
-    fig, ax = plt.subplots(figsize=(7.2, 4.8))
-    colors = plt.get_cmap('viridis')(np.linspace(0.12, 0.86, len(betas)))
-    found = False
-    for beta, color in zip(betas, colors):
-        runs = results.get(beta, [])
-        summary = aggregate(runs, metric)
-        if summary is None:
-            continue
-        found = True
-        x, mean, sd, counts = summary
-        ax.plot(x, mean, lw=1.6, color=color,
-                label=rf'$\beta={beta:g}$ (seeds={len(runs)})')
-        ax.fill_between(x, mean - sd, mean + sd, color=color, alpha=0.14,
-                        linewidth=0)
-    if not found:
-        print(f'[WARN] No {metric} histories found; skipping figure')
-        plt.close(fig)
-        return
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel(ylabel)
-    ax.set_title(rf'Connectivity ablation ($N_0={n0}$)')
-    ax.grid(alpha=0.2, linestyle='--')
-    ax.legend(frameon=False)
-    fig.tight_layout()
-    for ext in ('png', 'pdf'):
-        target = out / f'connectivity_n0_{n0}_{metric}.{ext}'
-        fig.savefig(target, dpi=300, bbox_inches='tight')
-        print(f'Saved {target}')
-    plt.close(fig)
-
+    # Use epochs actually present in the runs; retain partial runs rather than truncating all.
+    grid = np.unique(np.concatenate([x for x, _ in series]))
+    vals = np.full((len(series), len(grid)), np.nan)
+    for i, (x, y) in enumerate(series):
+        if len(x) == 1:
+            vals[i, grid == x[0]] = y[0]
+        else:
+            inside = (grid >= x[0]) & (grid <= x[-1])
+            vals[i, inside] = np.interp(grid[inside], x, y)
+    counts = np.sum(np.isfinite(vals), axis=0)
+    valid = counts > 0
+    grid, vals, counts = grid[valid], vals[:, valid], counts[valid]
+    mean = np.nansum(vals, axis=0) / counts
+    std = np.zeros(len(grid))
+    for j in range(len(grid)):
+        if counts[j] > 1:
+            std[j] = np.std(vals[np.isfinite(vals[:, j]), j], ddof=1)
+    return grid, mean, std, len(series)
 
 def main():
-    args = parse_args()
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--folder', '--root', type=Path,
+                   default=Path('data/neurogenesis/beta_ablation/fashionmnist/beta'))
+    p.add_argument('--out', type=Path, default=None)
+    p.add_argument('--n0', nargs='+', type=int, default=[20],
+                   help='Initial neuron counts; default: 20. E.g. --n0 10 20 40 80 160')
+    p.add_argument('--betas', nargs='+', type=float, default=[0.1, 0.2, 0.4, 0.8])
+    args = p.parse_args()
     root = args.folder.expanduser()
-    out = args.out.expanduser() if args.out else root / 'plots'
+    if not root.is_dir():
+        p.error(f'Experiment directory does not exist: {root}')
+    out = (args.out or root / 'plots').expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    results = {}
-    for beta in args.betas:
-        runs = []
-        for seed in args.seeds:
-            path = locate(root, args.dataset, beta, args.n0, seed)
-            if path is None:
-                print(f'[MISSING] beta={beta:g}, N0={args.n0}, seed={seed}')
+    for n0 in args.n0:
+        for metric, ylabel, suffix in (
+            ('accuracy', 'Test accuracy (%)', 'test_accuracy'),
+            ('neurons', 'Number of neurons', 'neurons'),
+        ):
+            fig, ax = plt.subplots(figsize=(7.2, 4.8))
+            plotted = 0
+            for beta in args.betas:
+                result = collect(root, beta, n0, metric)
+                if result is None:
+                    print(f'[WARN] beta={beta:g}, N0={n0}: no {metric} trajectories')
+                    continue
+                x, mean, sd, n = result
+                color = COLORS.get(beta, None)
+                ax.plot(x, mean, lw=1.3, color=color, label=rf'$\beta={beta:g}$ (n={n})')
+                ax.fill_between(x, mean-sd, mean+sd, color=color, alpha=0.065, linewidth=0)
+                print(f'N0={n0}, beta={beta:g}, {metric}: {n} seed(s), {len(x)} epochs')
+                plotted += 1
+            if not plotted:
+                plt.close(fig)
                 continue
-            run = load_run(path)
-            if run is not None:
-                runs.append(run)
-                print(f'[OK] beta={beta:g}, seed={seed}, epochs={len(run[0])}: {path}')
-        results[beta] = runs
-    if not any(results.values()):
-        raise RuntimeError(f'No learning_curves.pt found under {root}; '
-                           'expected <dataset>/beta/value_<beta>/neurons_<N0>/seed_<seed>/')
-    plot(results, args.betas, 'accuracy', 'Test accuracy (%)', out, args.n0)
-    plot(results, args.betas, 'neurons', 'Number of neurons', out, args.n0)
-
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(ylabel)
+            ax.grid(alpha=0.20, linestyle='--')
+            ax.legend(frameon=False)
+            fig.tight_layout()
+            for ext in ('png', 'pdf'):
+                dest = out / f'fashionmnist_connectivity_n0_{n0}_{suffix}.{ext}'
+                fig.savefig(dest, dpi=300 if ext == 'png' else None, bbox_inches='tight')
+                print(f'Saved: {dest}')
+            plt.close(fig)
 
 if __name__ == '__main__':
     main()

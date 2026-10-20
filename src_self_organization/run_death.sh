@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
-FRACTIONS=(0.05 0.10 0.20 0.40)
+FRACTIONS=(0.005 0.05 0.5 0.95)
 SEEDS=(0 1 2 3 4)
 N0=20
 DATASET="${DATASET:-fashionmnist}"

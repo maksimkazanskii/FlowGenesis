@@ -1,162 +1,148 @@
-"""Plot FlowGenesis rate ablation: one accuracy and one population figure per N0.
+#!/usr/bin/env python3
+"""Plot FashionMNIST rate ablation: accuracy and neuron count.
 
-Expected layout:
-  ROOT/fashionmnist/rate/value_<rate>/neurons_<N0>/seed_<seed>/learning_curves.pt
-
-Each rate is plotted as mean +/- 1 sample SD across available seeds.
-Incomplete runs are supported: each epoch uses all seeds that reached it.
+For N0=160, overlay rates 1,2.5,5,10 with mean +/- SD across seeds.
+Supports partial runs by interpolating onto the shared observed epoch grid.
 """
-from pathlib import Path
 import argparse
-import re
-import warnings
-
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from pathlib import Path
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
-RATES = (1.0, 2.5, 5.0, 10.0)
-N0_VALUES = (20, 40, 80, 160)
-COLORS = {1.0: 'steelblue', 2.5: 'darkorange', 5.0: 'seagreen', 10.0: 'firebrick'}
+COLORS = {1.0: 'black', 2.5: 'steelblue', 5.0: 'orange', 10.0: 'red'}
 
-
-def numeric_array(value):
-    if value is None:
+def array(x):
+    if x is None:
         return None
-    if torch.is_tensor(value):
-        value = value.detach().cpu().numpy()
+    if torch.is_tensor(x):
+        x = x.detach().cpu().numpy()
     try:
-        a = np.asarray(value, dtype=float).reshape(-1)
-        return a if len(a) else None
-    except (TypeError, ValueError):
+        a = np.asarray(x, dtype=float).reshape(-1)
+        return a if a.size else None
+    except (ValueError, TypeError):
         return None
 
-
-def read_curve(path):
-    try:
-        payload = torch.load(path, map_location='cpu', weights_only=False)
-        if not isinstance(payload, dict):
-            raise ValueError('not a dictionary')
-        epochs = numeric_array(payload.get('epoch'))
-        acc = numeric_array(payload.get('test_accuracy'))
-        neurons = None
-        for key in ('num_neurons', 'neurons', 'neuron_history', 'population'):
-            neurons = numeric_array(payload.get(key))
-            if neurons is not None:
-                break
-        if epochs is None or acc is None:
-            raise ValueError('missing epoch or test_accuracy')
-        return epochs, acc, neurons
-    except Exception as exc:
-        warnings.warn(f'Skipping {path}: {exc}')
+def neurons(run, curves):
+    for key in ('num_neurons', 'neurons', 'neuron_history', 'population'):
+        a = array(curves.get(key))
+        if a is not None:
+            return a
+    path = run / 'statistics.pt'
+    if not path.exists():
         return None
-
-
-def collect(root, dataset, n0, rate):
-    base = root / dataset / 'rate'
-    # Match numeric value rather than depending on whether folder is value_5 or value_5.0.
-    folders = []
-    if base.exists():
-        for p in base.glob('value_*'):
-            try:
-                if abs(float(p.name.removeprefix('value_')) - rate) < 1e-9:
-                    folders.append(p)
-            except ValueError:
-                continue
-    by_metric = {'accuracy': [], 'neurons': []}
-    seen_seeds = set()
-    for folder in sorted(folders):
-        for run in sorted((folder / f'neurons_{n0}').glob('seed_*')):
-            if not re.fullmatch(r'seed_\d+', run.name):
-                continue
-            seed = int(run.name.split('_')[-1])
-            if seed in seen_seeds:
-                warnings.warn(f'Duplicate seed {seed} for N0={n0}, rate={rate}; using first')
-                continue
-            file = run / 'learning_curves.pt'
-            if not file.is_file():
-                continue
-            loaded = read_curve(file)
-            if loaded is None:
-                continue
-            seen_seeds.add(seed)
-            epochs, acc, neurons = loaded
-            for metric, vals in (('accuracy', acc), ('neurons', neurons)):
-                if vals is None:
-                    continue
-                length = min(len(epochs), len(vals))
-                # Map epochs explicitly: partial runs need not have identical lengths.
-                samples = {}
-                for ep, val in zip(epochs[:length], vals[:length]):
-                    if np.isfinite(ep) and np.isfinite(val) and ep >= 1 and ep == int(ep):
-                        samples[int(ep)] = float(val)
-                if samples:
-                    by_metric[metric].append(samples)
-    return by_metric
-
-
-def summarize(runs):
-    if not runs:
+    stats = torch.load(path, map_location='cpu', weights_only=False)
+    if not isinstance(stats, dict):
         return None
-    all_epochs = sorted(set().union(*(r.keys() for r in runs)))
-    means, stds, counts = [], [], []
-    for epoch in all_epochs:
-        values = np.asarray([r[epoch] for r in runs if epoch in r], dtype=float)
-        means.append(float(values.mean()))
-        stds.append(float(values.std(ddof=1)) if len(values) > 1 else 0.0)
-        counts.append(len(values))
-    return np.array(all_epochs), np.array(means), np.array(stds), np.array(counts)
+    for key in ('neurons', 'neuron_history', 'num_neurons_history', 'population',
+                'population_history', 'alive_history'):
+        a = array(stats.get(key))
+        if a is not None:
+            return a
+    for key in ('history', 'epoch_history', 'development_history'):
+        rows = stats.get(key)
+        if isinstance(rows, (list, tuple)) and rows and isinstance(rows[0], dict):
+            for field in ('neurons', 'num_neurons', 'population', 'alive'):
+                if all(field in row for row in rows):
+                    return array([row[field] for row in rows])
+    return None
 
-
-def make_plot(n0, metric, results, out, dataset):
-    fig, ax = plt.subplots(figsize=(7.2, 4.8))
-    plotted = False
-    for rate in RATES:
-        runs = results[rate][metric]
-        s = summarize(runs)
-        if s is None:
-            print(f'[WARN] N0={n0}, rate={rate:g}: no {metric} data')
+def collect(root, rate, n0, metric):
+    folder = root / f'value_{rate:g}' / f'neurons_{n0}'
+    series = []
+    for run in sorted(folder.glob('seed_*')):
+        path = run / 'learning_curves.pt'
+        if not path.exists():
             continue
-        x, mean, std, counts = s
-        color = COLORS[rate]
-        ax.plot(x, mean, lw=1.5, color=color, label=f'Rate={rate:g} (seeds={len(runs)})')
-        ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.12, linewidth=0)
-        print(f'N0={n0} rate={rate:g} {metric}: {len(runs)} seeds, last epoch={x[-1]:g}, seeds at last epoch={counts[-1]}')
-        plotted = True
-    if not plotted:
-        plt.close(fig)
-        return
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Test accuracy (%)' if metric == 'accuracy' else 'Number of neurons')
-    ax.set_title(f'{dataset.upper()} — $N_0={n0}$')
-    ax.grid(alpha=0.20, linestyle='--')
-    ax.legend(frameon=False)
-    fig.tight_layout()
-    stem = f'{dataset}_rate_N{n0}_{"test_accuracy" if metric == "accuracy" else "neurons"}'
-    for ext in ('png', 'pdf'):
-        fig.savefig(out / f'{stem}.{ext}', dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f'Saved {stem}.png/.pdf')
-
+        try:
+            curves = torch.load(path, map_location='cpu', weights_only=False)
+            if not isinstance(curves, dict):
+                raise ValueError('learning_curves.pt is not a dictionary')
+            y = array(curves.get('test_accuracy')) if metric == 'accuracy' else neurons(run, curves)
+            if y is None:
+                continue
+            x = array(curves.get('epoch'))
+            if x is None:
+                x = np.arange(len(y), dtype=float)
+            n = min(len(x), len(y))
+            x, y = x[:n], y[:n]
+            good = np.isfinite(x) & np.isfinite(y)
+            x, y = x[good], y[good]
+            if not len(x):
+                continue
+            order = np.argsort(x)
+            x, y = x[order], y[order]
+            x, indices = np.unique(x, return_index=True)
+            y = y[indices]
+            series.append((x, y))
+        except Exception as exc:
+            print(f'[WARN] {run}: {exc}')
+    if not series:
+        return None
+    # Use epochs actually present in the runs; retain partial runs rather than truncating all.
+    grid = np.unique(np.concatenate([x for x, _ in series]))
+    vals = np.full((len(series), len(grid)), np.nan)
+    for i, (x, y) in enumerate(series):
+        if len(x) == 1:
+            vals[i, grid == x[0]] = y[0]
+        else:
+            inside = (grid >= x[0]) & (grid <= x[-1])
+            vals[i, inside] = np.interp(grid[inside], x, y)
+    counts = np.sum(np.isfinite(vals), axis=0)
+    valid = counts > 0
+    grid, vals, counts = grid[valid], vals[:, valid], counts[valid]
+    mean = np.nansum(vals, axis=0) / counts
+    std = np.zeros(len(grid))
+    for j in range(len(grid)):
+        if counts[j] > 1:
+            std[j] = np.std(vals[np.isfinite(vals[:, j]), j], ddof=1)
+    return grid, mean, std, len(series)
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--folder', '--root', dest='root', type=Path,
-                        default=Path('data/neurogenesis/rate_ablations'))
-    parser.add_argument('--dataset', default='fashionmnist')
-    parser.add_argument('--out', type=Path, default=None)
-    args = parser.parse_args()
-    root = args.root.expanduser()
-    out = args.out.expanduser() if args.out else root / 'plots'
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--folder', '--root', type=Path,
+                   default=Path('data/neurogenesis/rate_ablations/fashionmnist/rate'))
+    p.add_argument('--out', type=Path, default=None)
+    p.add_argument('--n0', nargs='+', type=int, default=[160],
+                   help='Initial neuron counts; default: 20. E.g. --n0 10 20 40 80 160')
+    p.add_argument('--rates', nargs='+', type=float, default=[1, 2.5, 5, 10])
+    args = p.parse_args()
+    root = args.folder.expanduser()
+    if not root.is_dir():
+        p.error(f'Experiment directory does not exist: {root}')
+    out = (args.out or root / 'plots').expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    for n0 in N0_VALUES:
-        results = {rate: collect(root, args.dataset, n0, rate) for rate in RATES}
-        for metric in ('accuracy', 'neurons'):
-            make_plot(n0, metric, results, out, args.dataset)
-    print(f'\nFigures directory: {out}')
-
+    for n0 in args.n0:
+        for metric, ylabel, suffix in (
+            ('accuracy', 'Test accuracy (%)', 'test_accuracy'),
+            ('neurons', 'Number of neurons', 'neurons'),
+        ):
+            fig, ax = plt.subplots(figsize=(7.2, 4.8))
+            plotted = 0
+            for rate in args.rates:
+                result = collect(root, rate, n0, metric)
+                if result is None:
+                    print(f'[WARN] rate={rate:g}, N0={n0}: no {metric} trajectories')
+                    continue
+                x, mean, sd, n = result
+                color = COLORS.get(rate, None)
+                ax.plot(x, mean, lw=1.3, color=color, label=rf'$r={rate:g}$ (n={n})')
+                ax.fill_between(x, mean-sd, mean+sd, color=color, alpha=0.065, linewidth=0)
+                print(f'N0={n0}, rate={rate:g}, {metric}: {n} seed(s), {len(x)} epochs')
+                plotted += 1
+            if not plotted:
+                plt.close(fig)
+                continue
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(ylabel)
+            ax.grid(alpha=0.20, linestyle='--')
+            ax.legend(frameon=False)
+            fig.tight_layout()
+            for ext in ('png', 'pdf'):
+                dest = out / f'fashionmnist_rate_n0_{n0}_{suffix}.{ext}'
+                fig.savefig(dest, dpi=300 if ext == 'png' else None, bbox_inches='tight')
+                print(f'Saved: {dest}')
+            plt.close(fig)
 
 if __name__ == '__main__':
     main()
