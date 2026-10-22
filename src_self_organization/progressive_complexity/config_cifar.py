@@ -89,7 +89,7 @@ class Config:
 
     min_neurons: int = 5
 
-    max_neurons: int = 900
+    max_neurons: int = 400
 
     structure_warmup_examples: int = 2000
 

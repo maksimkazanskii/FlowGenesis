@@ -175,6 +175,19 @@ def save_csv(path, rows):
         writer.writerows(rows)
 
 
+def sync_device(device):
+    """Ensure queued accelerator operations finish before stopping the clock."""
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
+    elif device.type == 'mps':
+        torch.mps.synchronize()
+
+
+def timed_now(device):
+    sync_device(device)
+    return time.perf_counter()
+
+
 def run_one(args, method, seed, data, device):
     seed_all(seed)
     order, train_parts, val_parts, test_parts = data
@@ -185,9 +198,15 @@ def run_one(args, method, seed, data, device):
     run_dir = Path(args.output) / method / f'seed_{seed}'
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / 'settings.json').write_text(json.dumps({**vars(args),
-        'method': method, 'seed': seed, 'class_order': order}, indent=2))
+                                                       'method': method, 'seed': seed, 'class_order': order}, indent=2))
     history = []
     events = []
+    timing_path = run_dir / 'epoch_timing.csv'
+    if args.resume and timing_path.exists():
+        with timing_path.open(newline='') as f:
+            epoch_timings = list(csv.DictReader(f))
+    else:
+        epoch_timings = []
     completed = 0
     ckpt_path = run_dir / 'latest.pt'
     if args.resume and ckpt_path.exists():
@@ -220,14 +239,22 @@ def run_one(args, method, seed, data, device):
                     for k in set(args.schedule)}
     for phase_idx in range(completed, len(args.schedule)):
         k = args.schedule[phase_idx]
+        if method == 'flowgenesis' and phase_idx > 0 and args.schedule[phase_idx - 1] != k:
+            model.container.reset_complexity_observation()
+            print(f'[COMPLEXITY RESET] phase={phase_idx + 1} '
+                  f'K={args.schedule[phase_idx - 1]}->{k} '
+                  f'N={model.container.num_neurons}', flush=True)
         allowed = torch.zeros(100, dtype=torch.bool, device=device)
         allowed[order[:k]] = True
         # Independent per-phase sampling stream; repeatable after resume.
         train_loader = make_train_loader(train_parts[k], args,
                                          seed * 100000 + phase_idx)
         val_loader, test_loader = eval_loaders[k]
-        start = time.time()
+        start = timed_now(device)
+        phase_train_times = []
+        phase_validation_times = []
         for epoch in range(1, args.epochs_per_phase + 1):
+            epoch_start = timed_now(device)
             model.train()
             model.container.current_epoch = phase_idx * args.epochs_per_phase + epoch
             correct = total = 0
@@ -254,20 +281,50 @@ def run_one(args, method, seed, data, device):
                                    'classes': k, 'neurons': c.num_neurons,
                                    'births': update.births, 'deaths': update.deaths,
                                    'flux': stats['network_mean_flux']})
-            if epoch == 1 or epoch % args.log_every == 0 or epoch == args.epochs_per_phase:
+            train_seconds = timed_now(device) - epoch_start
+            phase_train_times.append(train_seconds)
+            validation_seconds = 0.0
+            should_validate = (epoch == 1 or epoch % args.log_every == 0
+                               or epoch == args.epochs_per_phase)
+            if should_validate:
+                val_start = timed_now(device)
                 val_acc, _ = evaluate(model, val_loader, device, allowed)
+                validation_seconds = timed_now(device) - val_start
+                phase_validation_times.append(validation_seconds)
+            epoch_timings.append({
+                'method': method, 'seed': seed,
+                'phase': phase_idx + 1, 'classes': k,
+                'epoch': epoch,
+                'global_epoch': phase_idx * args.epochs_per_phase + epoch,
+                'neurons': model.container.num_neurons,
+                'train_seconds': round(train_seconds, 6),
+                'validation_seconds': round(validation_seconds, 6),
+                'epoch_seconds': round(train_seconds + validation_seconds, 6),
+                'validation_ran': int(should_validate),
+                'steps': args.steps_per_epoch,
+                'seconds_per_step': round(train_seconds / args.steps_per_epoch, 6),
+            })
+            save_csv(timing_path, epoch_timings)
+            if should_validate:
                 row = {'phase': phase_idx + 1, 'classes': k, 'epoch': epoch,
                        'global_epoch': phase_idx * args.epochs_per_phase + epoch,
                        'train_accuracy': 100 * correct / max(1, total),
                        'train_loss': loss_total / max(1, total),
                        'val_accuracy': val_acc, 'neurons': model.container.num_neurons,
-                       'active_parameters': active_parameters(model)}
+                       'active_parameters': active_parameters(model),
+                       'train_seconds': train_seconds,
+                       'validation_seconds': validation_seconds}
                 history.append(row)
                 save_csv(run_dir / 'learning_curves.csv', history)
                 print(f'{method} seed={seed} phase={phase_idx+1:02d}/{len(args.schedule)} '
                       f'K={k:3d} epoch={epoch:03d}/{args.epochs_per_phase} '
                       f'train={row["train_accuracy"]:.2f} val={val_acc:.2f} '
-                      f'N={row["neurons"]}', flush=True)
+                      f'N={row["neurons"]} '
+                      f'train_time={train_seconds:.2f}s '
+                      f'val_time={validation_seconds:.2f}s '
+                      f'avg_train_time={np.mean(phase_train_times):.2f}s/epoch', flush=True)
+        phase_training_seconds = sum(phase_train_times)
+        phase_validation_seconds = sum(phase_validation_times)
         test_acc, test_loss = evaluate(model, test_loader, device, allowed)
         full_acc, full_loss = evaluate(model, eval_loaders[100][1], device, None)
         phase_row = {'phase': phase_idx + 1, 'classes': k,

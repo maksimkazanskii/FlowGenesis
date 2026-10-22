@@ -109,6 +109,7 @@ class NeuralContainer(nn.Module):
         self.examples_seen = 0
         self.last_structure_examples = -10**15
         self.window_examples = 0
+        self._prime_flux_on_next_batch = False
 
         # Trainable network
         self.input_layer = nn.Linear(self.input_dim, self.hidden_dim, bias=False)
@@ -187,11 +188,33 @@ class NeuralContainer(nn.Module):
         return h
 
     @torch.no_grad()
+    def reset_complexity_observation(self) -> None:
+        """Start fresh structural observations while preserving learned architecture."""
+        self.previous_state.zero_()
+        self.flux.zero_()
+        self.flux_ema.zero_()
+        self.activity.zero_()
+        self.activity_ema.zero_()
+        self.capacity.zero_()
+        self.epoch_flux_sum.zero_()
+        self.epoch_activity_sum.zero_()
+        self.epoch_batch_count = 0
+        self.window_examples = 0
+        self.birth_streak.zero_()
+        self.death_streak.zero_()
+        self._prime_flux_on_next_batch = True
+
+    @torch.no_grad()
     def _update_batch_statistics(self, final_state: torch.Tensor) -> None:
         """Update Flux and activity after every training batch."""
         current_state = final_state.detach().mean(dim=0)
         current_activity = final_state.detach().abs().mean(dim=0)
-        batch_flux = torch.abs(current_state - self.previous_state)
+        if self._prime_flux_on_next_batch:
+            # Avoid an artificial jump from the zeroed previous_state.
+            batch_flux = torch.zeros_like(current_state)
+            self._prime_flux_on_next_batch = False
+        else:
+            batch_flux = torch.abs(current_state - self.previous_state)
 
         self.flux.copy_(batch_flux)
         self.activity.copy_(current_activity)
