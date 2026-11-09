@@ -92,7 +92,13 @@ def draw(ax, runs, metric, ylabel, scale=1.0):
         ax.plot(tasks, mean / scale, '-o', lw=1.8, markersize=3,
                 label=LABELS[method], color=color)
         # SD across available seeds at each task; one seed -> no band.
-        ax.fill_between(tasks, (mean - std) / scale, (mean + std) / scale,
+        lower = mean - std
+        upper = mean + std
+
+        if metric == 'module_neurons':
+            lower = np.maximum(lower, 0)
+
+        ax.fill_between(tasks, lower / scale, upper / scale,
                         color=color, alpha=0.16, linewidth=0)
     ax.set_xlabel('Task number')
     ax.set_ylabel(ylabel)
